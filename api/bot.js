@@ -280,20 +280,29 @@ async function processCallback(query) {
     }
 }
 
-// --- Webhook Export (Optimized for Vercel) ---
+// --- Webhook Export (Optimized for Debugging) ---
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         try {
             const update = req.body;
+            console.log("১. টেলিগ্রাম থেকে ডাটা এসেছে:", JSON.stringify(update));
+
+            // Test bypass: ডাটাবেস ছাড়া সরাসরি রেসপন্স চেক করার জন্য
+            if (update.message && update.message.text === '/test') {
+                console.log("২. টেস্ট কমান্ড রান হচ্ছে...");
+                await bot.sendMessage(update.message.chat.id, "✅ <b>Vercel এবং Telegram ঠিকমতো কানেক্টেড!</b>", { parse_mode: 'HTML' });
+                return res.status(200).send('OK');
+            }
+
+            // আপনার রেগুলার লজিক
             if (update.message) {
                 await processMessage(update.message);
             } else if (update.callback_query) {
                 await processCallback(update.callback_query);
             }
         } catch (error) {
-            console.error('Update Processing Error:', error);
+            console.error('❌ এরর পাওয়া গেছে:', error);
         }
     }
-    // Return OK immediately to prevent Telegram retries
     res.status(200).send('OK');
 };
