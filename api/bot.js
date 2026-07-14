@@ -37,7 +37,7 @@ const userManageMenu = {
 // --- Helper Functions ---
 async function getSettings() {
     const { data } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
-    return data || {};
+    return data || { default_msg_limit: 2, target_email: 'xtremepremiumts@gmail.com' };
 }
 
 async function setUserState(chatId, state) {
@@ -48,33 +48,38 @@ async function setUserState(chatId, state) {
 async function processMessage(msg) {
     const chatId = msg.chat.id;
     const text = msg.text;
-    const isAdmin = ADMIN_IDS.includes(chatId);
+    const isAdmin = ADMIN_IDS.includes(Number(chatId));
     if (!text) return;
 
     const settings = await getSettings();
     const currentMenu = isAdmin ? mainMenu : basicMenu;
 
-    // 1. Get or Create User
+    // 1. Get or Create User & Handle Daily Reset
     let { data: user } = await supabase.from('bot_users').select('*').eq('telegram_id', chatId).single();
-    
+    const today = new Date().toISOString().split('T')[0];
+
     if (!user) {
-        await supabase.from('bot_users').insert([{ telegram_id: chatId, is_approved: isAdmin, is_admin: isAdmin }]);
-        user = { telegram_id: chatId, is_approved: isAdmin, current_state: null, sms_count: 0, is_banned: false };
+        user = { telegram_id: chatId, is_approved: isAdmin, is_admin: isAdmin, is_banned: false, sms_count: 0, last_reset: today, current_state: null };
+        await supabase.from('bot_users').insert([user]);
+    } else if (user.last_reset !== today) {
+        // Reset 24-hour SMS Limit
+        await supabase.from('bot_users').update({ sms_count: 0, last_reset: today }).eq('telegram_id', chatId);
+        user.sms_count = 0;
     }
 
-    if (user.is_banned) return bot.sendMessage(chatId, "❌ <b>You are permanently banned.</b>", { parse_mode: 'HTML' });
+    if (user.is_banned) return bot.sendMessage(chatId, "❌ <b>You are permanently banned.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
-    // 2. Cancel Action
+    // 2. Cancel Action Handling
     if (text === '❌ Cancel') {
         await setUserState(chatId, null);
         return bot.sendMessage(chatId, "🚫 <b>Action Cancelled.</b>", { parse_mode: 'HTML', ...(isAdmin ? adminMenu : basicMenu) });
     }
 
-    // 3. Secret Invite Code Logic for Unapproved Users
+    // 3. New User Flow (NO BUTTONS, STRICTLY CODE ONLY)
     if (!user.is_approved && !isAdmin) {
-        if (text.startsWith('/start')) {
+        if (text.startsWith('/start') || !user.current_state) {
             await setUserState(chatId, 'WAITING_SECRET_CODE');
-            return bot.sendMessage(chatId, "🔒 <b>Please enter your secret invite code to access the bot:</b>\n\n(If you don't have one, please contact admin)", { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, "🔒 <b>Please enter your secret invite code to access the bot:</b>\n\n(If you don't have one, please contact admin)", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
         }
 
         if (user.current_state === 'WAITING_SECRET_CODE') {
@@ -83,63 +88,88 @@ async function processMessage(msg) {
                 await supabase.from('bot_users').update({ is_approved: true, current_state: null }).eq('telegram_id', chatId);
                 await supabase.from('bot_invites').update({ current_uses: invite.current_uses + 1 }).eq('code', text);
                 
-                // Expire code if max reached
                 if (invite.current_uses + 1 >= invite.max_uses) {
                     await supabase.from('bot_invites').update({ is_active: false }).eq('code', text);
                 }
                 return bot.sendMessage(chatId, "✅ <b>Access Granted! Welcome to the bot.</b>", { parse_mode: 'HTML', ...basicMenu });
             } else {
-                return bot.sendMessage(chatId, "❌ <b>Invalid or expired code. Please try again:</b>", { parse_mode: 'HTML' });
+                return bot.sendMessage(chatId, "❌ <b>Invalid or expired code. Please try again:</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
             }
         }
-        return; // Stop processing if not approved and not entering code
+        return; 
     }
 
-    // 4. State Management (When DB has a state saved)
+    // 4. State Management (Inputs)
     if (user.current_state) {
         const state = user.current_state;
         
         if (state === 'WAITING_NUMBER') {
             await setUserState(chatId, null);
             if (user.sms_count >= settings.default_msg_limit && !isAdmin) {
-                return bot.sendMessage(chatId, "⚠️ <b>Your daily message limit has been reached.</b>", { parse_mode: 'HTML', ...currentMenu });
+                return bot.sendMessage(chatId, `⚠️ <b>Your daily limit of ${settings.default_msg_limit} requests is reached.</b>\nCome back tomorrow!`, { parse_mode: 'HTML', ...currentMenu });
             }
             const confirmMenu = { reply_markup: { inline_keyboard: [[{ text: '📩 Send Message', callback_data: `sendmsg_${text}` }]] } };
             return bot.sendMessage(chatId, `📞 <b>Number:</b> <code>${text}</code>\n\n<i>Click the button below to send the request.</i>`, { parse_mode: 'HTML', ...confirmMenu });
         }
 
         if (isAdmin) {
-            if (state === 'WAITING_INVITE_COUNT') {
-                const limit = parseInt(text);
-                if (isNaN(limit)) return bot.sendMessage(chatId, "❌ Please enter a valid number.", cancelMenu);
-                
+            try {
+                if (state === 'WAITING_WLC') {
+                    await setUserState(chatId, null);
+                    await supabase.from('bot_settings').update({ welcome_msg: text }).eq('id', 1);
+                    return bot.sendMessage(chatId, "✅ <b>Welcome message updated successfully.</b>", { parse_mode: 'HTML', ...adminMenu });
+                }
+                if (state === 'WAITING_LIMIT') {
+                    await setUserState(chatId, null);
+                    const limit = parseInt(text);
+                    if (isNaN(limit)) return bot.sendMessage(chatId, "❌ Invalid number. Must be a digit.", adminMenu);
+                    await supabase.from('bot_settings').update({ default_msg_limit: limit }).eq('id', 1);
+                    return bot.sendMessage(chatId, `✅ <b>Users can now send ${limit} SMS per 24 hours.</b>`, { parse_mode: 'HTML', ...adminMenu });
+                }
+                if (state === 'WAITING_INVITE_COUNT') {
+                    await setUserState(chatId, null);
+                    const limit = parseInt(text);
+                    if (isNaN(limit)) return bot.sendMessage(chatId, "❌ Invalid number.", adminMenu);
+                    const code = 'VIP_' + Math.random().toString(36).substr(2, 6).toUpperCase();
+                    await supabase.from('bot_invites').insert([{ code: code, max_uses: limit }]);
+                    return bot.sendMessage(chatId, `🔗 <b>Invite Generated!</b>\n\nCode: <code>${code}</code>\nMax Users: ${limit}`, { parse_mode: 'HTML', ...adminMenu });
+                }
+                if (state === 'WAITING_TARGET_EMAIL') {
+                    await setUserState(chatId, null);
+                    await supabase.from('bot_settings').update({ target_email: text }).eq('id', 1);
+                    return bot.sendMessage(chatId, `✅ <b>Target Email updated to:</b> ${text}`, { parse_mode: 'HTML', ...adminMenu });
+                }
+                if (state === 'WAITING_SMTP_CREDS') {
+                    await setUserState(chatId, null);
+                    const lines = text.split('\n');
+                    if (lines.length < 2) return bot.sendMessage(chatId, "❌ Invalid format. Needs 2 lines.", adminMenu);
+                    await supabase.from('bot_settings').update({ smtp_user: lines[0].trim(), smtp_pass: lines[1].trim() }).eq('id', 1);
+                    return bot.sendMessage(chatId, `✅ <b>SMTP Setup Successful!</b>`, { parse_mode: 'HTML', ...adminMenu });
+                }
+                if (state === 'WAITING_BROADCAST') {
+                    await setUserState(chatId, null);
+                    const confirmBroadcast = { reply_markup: { inline_keyboard: [[{ text: '📢 Confirm Broadcast', callback_data: `bcast_confirm_${encodeURIComponent(text)}` }]] } };
+                    return bot.sendMessage(chatId, `<b>Message Preview:</b>\n\n${text}\n\n<i>Confirm to send.</i>`, { parse_mode: 'HTML', ...confirmBroadcast });
+                }
+                if (state === 'WAITING_APPROVE_ID') {
+                    await setUserState(chatId, null);
+                    await supabase.from('bot_users').update({ is_approved: true }).eq('telegram_id', parseInt(text));
+                    bot.sendMessage(parseInt(text), "✅ <b>Your account has been approved by admin!</b>", { parse_mode: 'HTML', ...basicMenu }).catch(()=>{});
+                    return bot.sendMessage(chatId, `✅ <b>User ${text} approved.</b>`, { parse_mode: 'HTML', ...userManageMenu });
+                }
+                if (state === 'WAITING_REMOVE_ID') {
+                    await setUserState(chatId, null);
+                    await supabase.from('bot_users').delete().eq('telegram_id', parseInt(text));
+                    return bot.sendMessage(chatId, `✅ <b>User ${text} removed.</b>`, { parse_mode: 'HTML', ...userManageMenu });
+                }
+                if (state === 'WAITING_BAN_ID') {
+                    await setUserState(chatId, null);
+                    await supabase.from('bot_users').update({ is_banned: true }).eq('telegram_id', parseInt(text));
+                    return bot.sendMessage(chatId, `🚫 <b>User ${text} banned.</b>`, { parse_mode: 'HTML', ...userManageMenu });
+                }
+            } catch (err) {
                 await setUserState(chatId, null);
-                const code = 'VIP_' + Math.random().toString(36).substr(2, 6).toUpperCase();
-                await supabase.from('bot_invites').insert([{ code: code, max_uses: limit }]);
-                return bot.sendMessage(chatId, `🔗 <b>Invite Generated!</b>\n\nCode: <code>${code}</code>\nMax Users: ${limit}\n\n<i>Users will be asked for this code when they start the bot.</i>`, { parse_mode: 'HTML', ...adminMenu });
-            }
-            if (state === 'WAITING_TARGET_EMAIL') {
-                await setUserState(chatId, null);
-                await supabase.from('bot_settings').update({ target_email: text }).eq('id', 1);
-                return bot.sendMessage(chatId, `✅ <b>Target Email updated to:</b> ${text}`, { parse_mode: 'HTML', ...adminMenu });
-            }
-            if (state === 'WAITING_SMTP_CREDS') {
-                await setUserState(chatId, null);
-                const [email, pass] = text.split('\n');
-                await supabase.from('bot_settings').update({ smtp_user: email, smtp_pass: pass }).eq('id', 1);
-                return bot.sendMessage(chatId, `✅ <b>SMTP Setup Successful!</b>`, { parse_mode: 'HTML', ...adminMenu });
-            }
-            if (state === 'WAITING_BROADCAST') {
-                await setUserState(chatId, null);
-                // Save text temporarily in DB or pass it. Here we just echo it for confirmation.
-                const confirmBroadcast = { reply_markup: { inline_keyboard: [[{ text: '📢 Confirm Broadcast', callback_data: `bcast_confirm_${encodeURIComponent(text)}` }]] } };
-                return bot.sendMessage(chatId, `<b>Message Preview:</b>\n\n${text}\n\n<i>Confirm to send.</i>`, { parse_mode: 'HTML', ...confirmBroadcast });
-            }
-            if (state === 'WAITING_APPROVE_ID') {
-                await setUserState(chatId, null);
-                await supabase.from('bot_users').update({ is_approved: true }).eq('telegram_id', parseInt(text));
-                bot.sendMessage(parseInt(text), "✅ <b>Your account has been approved by admin!</b>", { parse_mode: 'HTML', ...basicMenu }).catch(()=>{});
-                return bot.sendMessage(chatId, `✅ <b>User ${text} approved.</b>`, { parse_mode: 'HTML', ...userManageMenu });
+                return bot.sendMessage(chatId, `❌ <b>Database Error:</b> ${err.message}`, { parse_mode: 'HTML', ...adminMenu });
             }
         }
     }
@@ -148,51 +178,44 @@ async function processMessage(msg) {
     if (text === '/start') {
         return bot.sendMessage(chatId, settings.welcome_msg || 'Welcome', { parse_mode: 'HTML', ...currentMenu });
     }
-    
     if (text === '📱 Fix Number') {
         await setUserState(chatId, 'WAITING_NUMBER');
         return bot.sendMessage(chatId, "📞 <b>Enter the number with country code:</b>", { parse_mode: 'HTML', ...cancelMenu });
     }
-
     if (text === '🎧 Support') {
         return bot.sendMessage(chatId, `👨‍💻 <b>Support System</b>\n\nFor any issues, please contact admin.`, { parse_mode: 'HTML' });
     }
 
-    // 6. Admin Commands
+    // 6. Admin Commands (Triggers)
     if (isAdmin) {
         if (text === '⚙️ Admin Panel') return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
         if (text === '🔙 Back to Main') return bot.sendMessage(chatId, "🏠 <b>Main Menu</b>", { parse_mode: 'HTML', ...mainMenu });
         if (text === '🔙 Back to Admin') return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
         if (text === '👥 Users') return bot.sendMessage(chatId, "👥 <b>User Management</b>", { parse_mode: 'HTML', ...userManageMenu });
         
-        if (text === '🔗 Generate Invite') {
-            await setUserState(chatId, 'WAITING_INVITE_COUNT');
-            return bot.sendMessage(chatId, "🔢 <b>How many users can use this code?</b>\n(Example: 3)", { parse_mode: 'HTML', ...cancelMenu });
-        }
+        if (text === '📝 WLC MESSAGE EDIT') { await setUserState(chatId, 'WAITING_WLC'); return bot.sendMessage(chatId, "Send new welcome message:", { ...cancelMenu }); }
+        if (text === '📊 LIMIT USER') { await setUserState(chatId, 'WAITING_LIMIT'); return bot.sendMessage(chatId, `📊 Current Limit: ${settings.default_msg_limit}\n\nEnter new 24h SMS limit per user:`, { ...cancelMenu }); }
+        if (text === '🔗 Generate Invite') { await setUserState(chatId, 'WAITING_INVITE_COUNT'); return bot.sendMessage(chatId, "🔢 <b>How many users can use this code?</b>", { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '🎯 Set Target Email') { await setUserState(chatId, 'WAITING_TARGET_EMAIL'); return bot.sendMessage(chatId, `📧 Current Target: <code>${settings.target_email}</code>\n\nEnter new target email:`, { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '📧 SMTP Setup') { await setUserState(chatId, 'WAITING_SMTP_CREDS'); return bot.sendMessage(chatId, "⚙️ <b>Send your Gmail and App Password.</b>\n\nFormat (in two lines):\n<code>yourmail@gmail.com\npassword</code>", { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '📢 Broadcast') { await setUserState(chatId, 'WAITING_BROADCAST'); return bot.sendMessage(chatId, "Send the message you want to broadcast:", { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '✅ Approve User') { await setUserState(chatId, 'WAITING_APPROVE_ID'); return bot.sendMessage(chatId, "Enter Telegram ID to approve:", { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '❌ Remove User') { await setUserState(chatId, 'WAITING_REMOVE_ID'); return bot.sendMessage(chatId, "Enter Telegram ID to remove:", { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '🚫 Ban User') { await setUserState(chatId, 'WAITING_BAN_ID'); return bot.sendMessage(chatId, "Enter Telegram ID to ban:", { parse_mode: 'HTML', ...cancelMenu }); }
         
-        if (text === '🎯 Set Target Email') {
-            await setUserState(chatId, 'WAITING_TARGET_EMAIL');
-            return bot.sendMessage(chatId, `📧 Current Target: <code>${settings.target_email}</code>\n\nEnter new target email:`, { parse_mode: 'HTML', ...cancelMenu });
+        if (text === '⚙️ BOT ON/OFF') {
+            const newStatus = !settings.bot_status;
+            await supabase.from('bot_settings').update({ bot_status: newStatus }).eq('id', 1);
+            return bot.sendMessage(chatId, `✅ <b>Bot is now ${newStatus ? 'ON' : 'OFF'}.</b>`, { parse_mode: 'HTML' });
         }
-        
-        if (text === '📧 SMTP Setup') {
-            await setUserState(chatId, 'WAITING_SMTP_CREDS');
-            return bot.sendMessage(chatId, "⚙️ <b>Send your Gmail and App Password.</b>\n\nFormat (in two lines):\n<code>yourmail@gmail.com\nyour_16_digit_app_password</code>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-
-        if (text === '📢 Broadcast') {
-            await setUserState(chatId, 'WAITING_BROADCAST');
-            return bot.sendMessage(chatId, "Send the message you want to broadcast:", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        
-        if (text === '✅ Approve User') {
-            await setUserState(chatId, 'WAITING_APPROVE_ID');
-            return bot.sendMessage(chatId, "Enter Telegram ID to approve:", { parse_mode: 'HTML', ...cancelMenu });
+        if (text === '🗑 Clear Database') {
+            await supabase.from('bot_users').delete().eq('is_admin', false);
+            return bot.sendMessage(chatId, "🧹 <b>Database cleared. All non-admin users removed.</b>", { parse_mode: 'HTML' });
         }
     }
 }
 
-// --- Callback Processor (For Inline Buttons) ---
+// --- Callback Processor ---
 async function processCallback(query) {
     const chatId = query.message.chat.id;
     const msgId = query.message.message_id;
@@ -202,63 +225,48 @@ async function processCallback(query) {
     if (data.startsWith('sendmsg_')) {
         const number = data.split('_')[1];
         let { data: user } = await supabase.from('bot_users').select('sms_count').eq('telegram_id', chatId).single();
+        
         await supabase.from('bot_users').update({ sms_count: (user.sms_count || 0) + 1 }).eq('telegram_id', chatId);
-
         await bot.editMessageText(`⏳ <b>Sending Email... Please wait.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         
-        // Nodemailer Logic Database integration
         try {
             if(settings.smtp_user && settings.smtp_pass && settings.target_email) {
-                const transporter = nodemailer.createTransport({
-                    service: 'gmail',
-                    auth: { user: settings.smtp_user, pass: settings.smtp_pass }
-                });
-                
+                const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: settings.smtp_user, pass: settings.smtp_pass } });
                 await transporter.sendMail({
-                    from: settings.smtp_user,
-                    to: settings.target_email,
+                    from: settings.smtp_user, to: settings.target_email,
                     subject: 'New Number Fix Request',
                     text: `A new request has been submitted.\nNumber: ${number}\nFrom Telegram ID: ${chatId}`
                 });
-            } else {
-                console.log("Email skipped: SMTP credentials or Target Email missing in DB.");
             }
         } catch (error) {
             console.error("Email Error: ", error);
         }
         
-        const successMsg = `✅ <b>Sent Successfully</b>\n\n📞 <b>Number:</b> <code>${number}</code>\n\n<i>Please wait one minute for reply and better result.</i>`;
-        await bot.editMessageText(successMsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+        await bot.editMessageText(`✅ <b>Sent Successfully</b>\n\n📞 <b>Number:</b> <code>${number}</code>\n\n<i>Please wait one minute for reply.</i>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
     }
 
-    if (data.startsWith('bcast_confirm_') && ADMIN_IDS.includes(chatId)) {
+    if (data.startsWith('bcast_confirm_') && ADMIN_IDS.includes(Number(chatId))) {
         const bcastMsg = decodeURIComponent(data.replace('bcast_confirm_', ''));
-        
         await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         const { data: users } = await supabase.from('bot_users').select('telegram_id').eq('is_approved', true);
         
-        let success = 0;
+        let success = 0, failed = 0;
         for (const u of users) {
-            try { await bot.sendMessage(u.telegram_id, bcastMsg, { parse_mode: 'HTML' }); success++; } catch (e) {}
+            try { await bot.sendMessage(u.telegram_id, bcastMsg, { parse_mode: 'HTML' }); success++; } 
+            catch (e) { failed++; }
         }
         await bot.deleteMessage(chatId, msgId);
-        await bot.sendMessage(chatId, `📢 <b>Broadcast completed!</b>\n✅ Success: ${success}`, { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, `📢 <b>Broadcast completed!</b>\n✅ Success: ${success}\n❌ Failed: ${failed}`, { parse_mode: 'HTML' });
     }
 }
 
-// --- Webhook Export ---
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         try {
             const update = req.body;
-            if (update.message) {
-                await processMessage(update.message);
-            } else if (update.callback_query) {
-                await processCallback(update.callback_query);
-            }
-        } catch (error) {
-            console.error('Update Processing Error:', error);
-        }
+            if (update.message) await processMessage(update.message);
+            else if (update.callback_query) await processCallback(update.callback_query);
+        } catch (error) {}
     }
     res.status(200).send('OK');
 };
