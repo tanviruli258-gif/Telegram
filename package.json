@@ -1,0 +1,11 @@
+{
+  "name": "telegram-support-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot with Supabase and Vercel",
+  "main": "api/bot.js",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "nodemailer": "^6.9.13",
+    "@supabase/supabase-js": "^2.39.8"
+  }
+}
