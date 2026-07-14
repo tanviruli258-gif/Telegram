@@ -10,87 +10,83 @@ const bot = new TelegramBot(token);
 const ADMIN_ID = 7392861032; 
 const TARGET_EMAIL = 'xtremepremiumts@gmail.com';
 
-// Supabase কনফিগারেশন
+// Supabase কনফিগারেশন (আপনার Key টি ভুল ছিল, তাই সেভ হচ্ছিল না। সঠিক Key বসাবেন)
 const supabaseUrl = 'https://ixptyhyaciqcymkejiey.supabase.co';
-const supabaseKey = 'Sb_publishable_M67GpIfk5KYume0uNQZOUQ_hvn79_1v';
+const supabaseKey = 'Sb_publishable_M67GpIfk5KYume0uNQZOUQ_hvn79_1v'; // দয়া করে Supabase থেকে সঠিক eyJ... Key টি এনে এখানে বসান
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 let cachedSettings = null; 
 let userStates = {};
 
-// --- কীবোর্ড মেনু (Premium Look) ---
-const userMenu = { reply_markup: { keyboard: [['📱 Fix number', '🎧 Support']], resize_keyboard: true } };
-const adminMenu = { reply_markup: { keyboard: [['📱 Fix number', '🎧 Support'], ['⚙️ Admin Panel']], resize_keyboard: true } };
+// --- রেগুলার কীবোর্ড মেনু (সব ইনলাইন বাটন বাদ) ---
+const userMenu = { 
+    reply_markup: { keyboard: [['📱 Fix number', '🎧 Support']], resize_keyboard: true } 
+};
 
-function getAdminPanelInline(settings) {
-    return {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: '📝 WLC MESSAGE EDIT', callback_data: 'edit_wlc' }],
-                [{ text: `⚙️ BOT: ${settings.bot_status ? 'ON 🟢' : 'OFF 🔴'}`, callback_data: 'toggle_bot' }],
-                [{ text: '🔑 API / PASSWORD SET', callback_data: 'set_api_menu' }],
-                [{ text: `📊 LIMIT USER (${settings.user_limit || 5})`, callback_data: 'set_limit' }]
-            ]
-        }
-    };
-}
+const adminMenu = { 
+    reply_markup: { keyboard: [['📱 Fix number', '🎧 Support'], ['⚙️ Admin Panel']], resize_keyboard: true } 
+};
 
-// --- কান্ট্রি ডিটেকশন ---
-function detectCountry(number) {
-    if (number.startsWith('+880')) return "Bangladesh 🇧🇩";
-    if (number.startsWith('+91')) return "India 🇮🇳";
-    if (number.startsWith('+92')) return "Pakistan 🇵🇰";
-    if (number.startsWith('+1')) return "USA/Canada 🇺🇸🇨🇦";
-    if (number.startsWith('+44')) return "UK 🇬🇧";
-    if (number.startsWith('+971')) return "UAE 🇦🇪";
-    if (number.startsWith('+966')) return "Saudi Arabia 🇸🇦";
-    if (number.startsWith('+60')) return "Malaysia 🇲🇾";
+const adminPanelMenu = {
+    reply_markup: { 
+        keyboard: [
+            ['📝 WLC MESSAGE EDIT', '⚙️ BOT ON/OFF'],
+            ['🔑 SET EMAIL API', '📊 LIMIT USER'],
+            ['🔙 Main Menu']
+        ], 
+        resize_keyboard: true 
+    }
+};
+
+const confirmSendMenu = {
+    reply_markup: { 
+        keyboard: [['📩 Send Message', '❌ Cancel']], 
+        resize_keyboard: true 
+    }
+};
+
+// --- উন্নত কান্ট্রি ডিটেকশন (যেকোনো ফরম্যাটে কাজ করবে) ---
+function detectCountry(num) {
+    const cleanNum = num.replace(/\D/g, ''); // সব + বা স্পেস সরিয়ে শুধু সংখ্যা নেবে
+    if (cleanNum.startsWith('880')) return "Bangladesh 🇧🇩";
+    if (cleanNum.startsWith('261')) return "Madagascar 🇲🇬"; // আপনার স্ক্রিনশটের কোড
+    if (cleanNum.startsWith('91')) return "India 🇮🇳";
+    if (cleanNum.startsWith('92')) return "Pakistan 🇵🇰";
+    if (cleanNum.startsWith('1')) return "USA/Canada 🇺🇸🇨🇦";
+    if (cleanNum.startsWith('44')) return "UK 🇬🇧";
+    if (cleanNum.startsWith('971')) return "UAE 🇦🇪";
+    if (cleanNum.startsWith('60')) return "Malaysia 🇲🇾";
     return "International 🌍";
 }
 
 // --- ডাটাবেস ফেচ ---
 async function getSettings() {
     if (cachedSettings) return cachedSettings; 
-    const { data, error } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
-    if (!data || error) {
-        const defaultSettings = { id: 1, welcome_msg: "<b>বটে আপনাকে স্বাগতম!</b>", bot_status: true, user_limit: 5, mail_method: '', mail_credentials: '', sender_email: '' };
-        await supabase.from('bot_settings').upsert(defaultSettings);
-        cachedSettings = defaultSettings;
+    
+    try {
+        const { data, error } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
+        if (error) throw error;
+        cachedSettings = data; 
         return cachedSettings;
+    } catch (error) {
+        // ডেটাবেস কাজ না করলে ডিফল্ট সেটিং মেমোরিতে রাখবে যেন বট থেমে না যায়
+        return { bot_status: true, user_limit: 5, welcome_msg: "<b>বটে আপনাকে স্বাগতম!</b>", mail_method: '', mail_credentials: '', sender_email: '' };
     }
-    cachedSettings = data; 
-    return cachedSettings;
 }
 
-// --- ডাটাবেস আপডেট (100% Guaranteed Save - Upsert) ---
-async function updateSettings(updates) {
+// --- ডাটাবেস আপডেট ---
+async function updateSettings(updates, chatId) {
     const current = await getSettings();
     const merged = { ...current, ...updates, id: 1 };
     
-    // upsert ব্যবহার করায় এটি বাধ্য হয়ে ডাটাবেসে সেভ করবেই
     const { error } = await supabase.from('bot_settings').upsert(merged);
     if (!error) {
         cachedSettings = merged; 
+        return true;
     } else {
-        console.error("DB Update Error:", error);
-    }
-}
-
-// --- ইমেইল সেন্ডার ---
-async function sendMail(settings, subject, text) {
-    if (settings.mail_method === 'gmail' && settings.mail_credentials) {
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: settings.sender_email, pass: settings.mail_credentials }
-        });
-        return await transporter.sendMail({
-            from: settings.sender_email,
-            to: TARGET_EMAIL,
-            subject: subject,
-            text: text
-        });
-    } else {
-        throw new Error("Credentials not set");
+        // ডাটাবেসে এরর হলে এডমিনকে মেসেজ দিয়ে জানাবে
+        bot.sendMessage(chatId, `⚠️ <b>Database Error:</b>\n<code>${error.message}</code>\n<i>আপনার Supabase API Key অথবা টেবিল ঠিক নেই!</i>`, { parse_mode: 'HTML' });
+        return false;
     }
 }
 
@@ -103,26 +99,20 @@ bot.on('message', async (msg) => {
     const settings = await getSettings();
     const menu = (chatId === ADMIN_ID) ? adminMenu : userMenu;
 
+    // মেইনটেনেন্স মোড
     if (settings.bot_status === false && chatId !== ADMIN_ID) {
         return bot.sendMessage(chatId, "⚠️ <b>বটটি বর্তমানে মেইনটেনেন্সে আছে।</b>\n<i>কিছুক্ষণ পর আবার চেষ্টা করুন।</i>", { parse_mode: 'HTML' });
     }
 
-    if (text === '/start') {
-        userStates[chatId] = null;
-        return bot.sendMessage(chatId, settings.welcome_msg, { parse_mode: 'HTML', ...menu });
-    }
-
-    if (text === '⚙️ Admin Panel' && chatId === ADMIN_ID) {
-        return bot.sendMessage(chatId, "<b>🔧 এডমিন প্যানেলে স্বাগতম:</b>", { parse_mode: 'HTML', ...getAdminPanelInline(settings) });
-    }
-
+    // --- State Handling (সব কমান্ডের আগে) ---
     if (userStates[chatId]) {
         const state = userStates[chatId];
-        userStates[chatId] = null; 
 
         if (state === 'AWAITING_WLC') {
-            await updateSettings({ welcome_msg: text });
-            return bot.sendMessage(chatId, "✅ <b>ওয়েলকাম মেসেজ সফলভাবে আপডেট হয়েছে!</b>", { parse_mode: 'HTML', ...menu });
+            userStates[chatId] = null;
+            const success = await updateSettings({ welcome_msg: text }, chatId);
+            if (success) bot.sendMessage(chatId, "✅ <b>ওয়েলকাম মেসেজ সফলভাবে আপডেট হয়েছে!</b>", { parse_mode: 'HTML', ...adminPanelMenu });
+            return;
         }
         
         if (state === 'AWAITING_GMAIL') {
@@ -132,128 +122,135 @@ bot.on('message', async (msg) => {
 
         if (state.startsWith('AWAITING_APP_PASS_')) {
             const email = state.replace('AWAITING_APP_PASS_', '');
+            userStates[chatId] = null;
             bot.sendMessage(chatId, "⏳ <i>কানেকশন চেক করা হচ্ছে...</i>", { parse_mode: 'HTML' });
             
             try {
                 const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: email, pass: text } });
                 await transporter.verify(); 
 
-                // সফল হলে ডেটাবেসে পার্মানেন্টলি সেভ হবে
-                await updateSettings({ mail_method: 'gmail', sender_email: email, mail_credentials: text, bot_status: true });
-                return bot.sendMessage(chatId, "✅ <b>সাকসেসফুল!</b> জিমেইল কানেক্ট হয়েছে এবং বট চালু করে দেওয়া হয়েছে।", { parse_mode: 'HTML', ...menu });
+                const success = await updateSettings({ mail_method: 'gmail', sender_email: email, mail_credentials: text, bot_status: true }, chatId);
+                if (success) bot.sendMessage(chatId, "✅ <b>সাকসেসফুল! জিমেইল কানেক্ট হয়েছে এবং সেভ হয়েছে।</b>", { parse_mode: 'HTML', ...adminPanelMenu });
             } catch (error) {
-                return bot.sendMessage(chatId, "❌ <b>কানেকশন ফেইলড!</b> জিমেইল বা অ্যাপ পাসওয়ার্ড সঠিক নয়।", { parse_mode: 'HTML', ...menu });
+                bot.sendMessage(chatId, "❌ <b>কানেকশন ফেইলড! জিমেইল বা অ্যাপ পাসওয়ার্ড সঠিক নয়।</b>", { parse_mode: 'HTML', ...adminPanelMenu });
             }
+            return;
         }
 
         if (state === 'AWAITING_LIMIT') {
+            userStates[chatId] = null;
             const limitValue = parseInt(text) || 5;
-            await updateSettings({ user_limit: limitValue });
-            return bot.sendMessage(chatId, `✅ <b>ইউজার লিমিট আপডেট করা হয়েছে:</b> <code>${limitValue}</code>`, { parse_mode: 'HTML', ...menu });
+            const success = await updateSettings({ user_limit: limitValue }, chatId);
+            if (success) bot.sendMessage(chatId, `✅ <b>ইউজার লিমিট আপডেট করা হয়েছে:</b> <code>${limitValue}</code>`, { parse_mode: 'HTML', ...adminPanelMenu });
+            return;
         }
 
         if (state === 'WAITING_FOR_NUMBER') {
             const number = text.trim();
-            const country = detectCountry(number);
-            const formattedMsg = `${number} 1 hour and red problem fix please.`;
-
-            const confirmKeyboard = {
-                reply_markup: { inline_keyboard: [[{ text: '🚀 Send Request', callback_data: `send_mail_${number}` }]] }
-            };
-            const responseText = `🌍 <b>Country:</b> ${country}\n📞 <b>Number:</b> <code>${number}</code>\n\n📝 <b>Message Preview:</b>\n"<i>${formattedMsg}</i>"`;
+            userStates[chatId] = `CONFIRM_SEND_${number}`; // নাম্বার সেভ করে সেন্ডের জন্য অপেক্ষা
             
-            return bot.sendMessage(chatId, responseText, { parse_mode: 'HTML', ...confirmKeyboard });
+            const country = detectCountry(number);
+            const formattedMsg = `+${number.replace(/\D/g, '')} 1 hour and red problem fix please.`;
+
+            const responseText = `🌍 <b>Country:</b> ${country}\n📞 <b>Number:</b> <code>${number}</code>\n\n📝 <b>Message Preview:</b>\n"<i>${formattedMsg}</i>"\n\nনিচের বাটন থেকে Send Message এ ক্লিক করুন।`;
+            
+            return bot.sendMessage(chatId, responseText, { parse_mode: 'HTML', ...confirmSendMenu });
         }
+    }
+
+    // --- Main Commands ---
+    if (text === '/start') {
+        userStates[chatId] = null;
+        return bot.sendMessage(chatId, settings.welcome_msg, { parse_mode: 'HTML', ...menu });
+    }
+
+    if (text === '🔙 Main Menu') {
+        userStates[chatId] = null;
+        return bot.sendMessage(chatId, "🏠 <b>মেইন মেনু:</b>", { parse_mode: 'HTML', ...menu });
+    }
+
+    if (text === '⚙️ Admin Panel' && chatId === ADMIN_ID) {
+        userStates[chatId] = null;
+        return bot.sendMessage(chatId, "<b>🔧 এডমিন প্যানেলে স্বাগতম:</b>", { parse_mode: 'HTML', ...adminPanelMenu });
     }
 
     if (text === '📱 Fix number') {
         userStates[chatId] = 'WAITING_FOR_NUMBER';
-        return bot.sendMessage(chatId, "📞 <b>দয়া করে কান্ট্রি কোড সহ নম্বরটি দিন</b>\n<i>(যেমন: +88017...):</i>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
+        return bot.sendMessage(chatId, "📞 <b>দয়া করে কান্ট্রি কোড সহ নম্বরটি দিন</b>\n<i>(যেমন: 88017... বা 26156...):</i>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
     }
     
     if (text === '🎧 Support') {
         return bot.sendMessage(chatId, "👨‍💻 <b>সাহায্যের জন্য এডমিনের সাথে যোগাযোগ করুন।</b>", { parse_mode: 'HTML' });
     }
-});
 
-// --- Inline Button Handlers ---
-bot.on('callback_query', async (query) => {
-    const chatId = query.message.chat.id;
-    const messageId = query.message.message_id;
-    const data = query.data;
-    const settings = await getSettings();
-    
+    // --- Admin Panel Buttons ---
     if (chatId === ADMIN_ID) {
-        if (data === 'toggle_bot') {
+        if (text === '⚙️ BOT ON/OFF') {
             const newStatus = !settings.bot_status;
-            await updateSettings({ bot_status: newStatus });
-            
-            bot.editMessageReplyMarkup(getAdminPanelInline(cachedSettings).reply_markup, {
-                chat_id: chatId, message_id: messageId
-            });
+            await updateSettings({ bot_status: newStatus }, chatId);
+            return bot.sendMessage(chatId, `✅ বট এখন <b>${newStatus ? 'ON 🟢' : 'OFF 🔴'}</b> করা হয়েছে।`, { parse_mode: 'HTML' });
         }
-        if (data === 'edit_wlc') {
+        if (text === '📝 WLC MESSAGE EDIT') {
             userStates[chatId] = 'AWAITING_WLC';
-            bot.sendMessage(chatId, "📝 <b>নতুন ওয়েলকাম মেসেজটি লিখে পাঠান:</b>\n<i>(আপনি চাইলে লেখায় HTML ট্যাগ ব্যবহার করতে পারেন)</i>", { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, "📝 <b>নতুন ওয়েলকাম মেসেজটি লিখে পাঠান:</b>", { parse_mode: 'HTML' });
         }
-        if (data === 'set_limit') {
+        if (text === '📊 LIMIT USER') {
             userStates[chatId] = 'AWAITING_LIMIT';
-            bot.sendMessage(chatId, "📊 <b>24 ঘণ্টায় একজন ইউজার কতটি মেসেজ পাঠাতে পারবে সেই সংখ্যাটি দিন:</b>", { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, "📊 <b>ইউজার লিমিটের সংখ্যা দিন:</b>", { parse_mode: 'HTML' });
         }
-        
-        if (data === 'set_api_menu') {
-            const apiMenu = {
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '🌐 API (Maintenance)', callback_data: 'setup_api' }],
-                        [{ text: '📧 Gmail App Password', callback_data: 'setup_gmail' }]
-                    ]
-                }
-            };
-            bot.sendMessage(chatId, "⚙️ <b>মেইল পাঠানোর মাধ্যম নির্বাচন করুন:</b>", { parse_mode: 'HTML', ...apiMenu });
-        }
-        if (data === 'setup_gmail') {
+        if (text === '🔑 SET EMAIL API') {
             userStates[chatId] = 'AWAITING_GMAIL';
-            bot.sendMessage(chatId, "📧 <b>যে জিমেইল থেকে মেসেজ পাঠাবেন সেটি দিন:</b>", { parse_mode: 'HTML' });
-        }
-        
-        if (data === 'setup_api') {
-            const maintMsg = "⚠️ <b>𝗦𝘆𝘀𝘁𝗲𝗺 𝗨𝗻𝗱𝗲𝗿 𝗠𝗮𝗶𝗻𝘁𝗲𝗻𝗮𝗻𝗰𝗲</b> ⚠️\n\n<i>This system is currently undergoing upgrades. Please utilize the Gmail App Password method for now.</i> 🚀✨";
-            bot.sendMessage(chatId, maintMsg, { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, "📧 <b>যে জিমেইল থেকে মেসেজ পাঠাবেন সেটি দিন:</b>\n<i>(API মেইনটেনেন্সে থাকায় সরাসরি জিমেইল দিন)</i>", { parse_mode: 'HTML' });
         }
     }
 
-    if (data.startsWith('send_mail_')) {
-        const number = data.replace('send_mail_', '');
-        const formattedMsg = `${number} 1 hour and red problem fix please.`;
+    // --- Send Logic (কীবোর্ড থেকে) ---
+    if (text === '❌ Cancel') {
+        userStates[chatId] = null;
+        return bot.sendMessage(chatId, "🚫 <b>রিকোয়েস্ট বাতিল করা হয়েছে।</b>", { parse_mode: 'HTML', ...menu });
+    }
+
+    if (text === '📩 Send Message') {
+        if (!userStates[chatId] || !userStates[chatId].startsWith('CONFIRM_SEND_')) {
+            return bot.sendMessage(chatId, "⚠️ <b>আগে একটি নাম্বার দিন।</b>", { parse_mode: 'HTML', ...menu });
+        }
+
+        const number = userStates[chatId].replace('CONFIRM_SEND_', '');
+        userStates[chatId] = null; // প্রসেস শেষ
+        const formattedMsg = `+${number.replace(/\D/g, '')} 1 hour and red problem fix please.`;
         
         if (!settings.mail_credentials) {
-            return bot.sendMessage(chatId, "❌ <b>এডমিন এখনো ইমেইল সেন্ড করার সিস্টেম চালু করেননি।</b>", { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, "❌ <b>এডমিন এখনো ইমেইল সেন্ড করার সিস্টেম চালু করেননি।</b>", { parse_mode: 'HTML', ...menu });
         }
 
-        bot.sendMessage(chatId, `⏳ <i>আপনার মেসেজ পাঠানো হচ্ছে...</i>`, { parse_mode: 'HTML' });
+        bot.sendMessage(chatId, `⏳ <i>আপনার মেসেজ পাঠানো হচ্ছে...</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
         try {
-            await sendMail(settings, `Fix Request for ${number}`, formattedMsg);
-            bot.sendMessage(chatId, "✅ <b>সফলভাবে মেসেজ সেন্ড হয়েছে!</b>", { parse_mode: 'HTML' });
+            const transporter = nodemailer.createTransport({
+                service: 'gmail',
+                auth: { user: settings.sender_email, pass: settings.mail_credentials }
+            });
+            await transporter.sendMail({
+                from: settings.sender_email,
+                to: TARGET_EMAIL,
+                subject: `Fix Request for +${number.replace(/\D/g, '')}`,
+                text: formattedMsg
+            });
+            bot.sendMessage(chatId, "✅ <b>সফলভাবে মেসেজ সেন্ড হয়েছে!</b>", { parse_mode: 'HTML', ...menu });
         } catch (error) {
-            console.error(error);
-            bot.sendMessage(chatId, "❌ <b>মেসেজ সেন্ড করতে সমস্যা হয়েছে। এডমিনকে জানান।</b>", { parse_mode: 'HTML' });
+            bot.sendMessage(chatId, `❌ <b>মেসেজ সেন্ড করতে সমস্যা হয়েছে।</b>\n<i>Error: ${error.message}</i>`, { parse_mode: 'HTML', ...menu });
         }
     }
 });
 
-// --- Vercel Webhook Handler ---
 module.exports = async (req, res) => {
     try {
         if (req.method === 'POST') {
-            await bot.processUpdate(req.body);
-            // Vercel Timeout Fix: বটকে প্রসেস শেষ করার সময় দেওয়া হচ্ছে
+            bot.processUpdate(req.body);
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
         res.status(200).send('OK');
     } catch (error) {
-        console.error("Webhook Error:", error);
         res.status(500).send('Error');
     }
 };
