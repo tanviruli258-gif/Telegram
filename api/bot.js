@@ -221,6 +221,9 @@ bot.on('callback_query', async (query) => {
 
 // --- Vercel Serverless Function ---
 module.exports = async (req, res) => {
+    // এই লগটি যুক্ত করলে রিকোয়েস্ট আসলেই আমরা লগে দেখতে পাব
+    console.log("টেলিগ্রাম থেকে রিকোয়েস্ট এসেছে:", req.body); 
+
     try {
         if (req.method === 'POST') {
             bot.processUpdate(req.body);
