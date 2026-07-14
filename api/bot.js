@@ -44,7 +44,6 @@ async function setUserState(chatId, state) {
     await supabase.from('bot_users').update({ current_state: state }).eq('telegram_id', chatId);
 }
 
-// দেশ ও পতাকা বের করার ফাংশন
 function getCountryInfo(phone) {
     const cleanPhone = phone.replace(/\D/g, '');
     const countryCodes = {
@@ -94,7 +93,6 @@ async function processMessage(msg) {
         return bot.sendMessage(chatId, "🚫 <b>Action Cancelled.</b>", { parse_mode: 'HTML', ...currentMenu });
     }
 
-    // New User Flow
     if (!user.is_approved && !isAdmin) {
         if (text.startsWith('/start') || !user.current_state) {
             await setUserState(chatId, 'WAITING_SECRET_CODE');
@@ -114,7 +112,6 @@ async function processMessage(msg) {
         return; 
     }
 
-    // State Management (Inputs)
     if (user.current_state) {
         const state = user.current_state;
         
@@ -159,7 +156,7 @@ async function processMessage(msg) {
                     return bot.sendMessage(chatId, `✅ <b>SMTP Setup Successful!</b>`, { parse_mode: 'HTML', ...adminMenu });
                 }
                 if (state === 'WAITING_BROADCAST') {
-                    // মেসেজটি callback_data এর বদলে ইউজারের current_state এ সেভ করে রাখছি
+                    // ব্রডকাস্ট ফিক্স: মেসেজ ডাটাবেসে সেভ করা হচ্ছে
                     await setUserState(chatId, 'PENDING_BCAST:' + text);
                     const confirmBroadcast = { reply_markup: { inline_keyboard: [[{ text: '📢 Confirm Broadcast', callback_data: `run_bcast` }]] } };
                     return bot.sendMessage(chatId, `<b>Message Preview:</b>\n\n${text}\n\n<i>Confirm to send.</i>`, { parse_mode: 'HTML', ...confirmBroadcast });
@@ -187,7 +184,6 @@ async function processMessage(msg) {
         }
     }
 
-    // Menus
     if (text === '/start') return bot.sendMessage(chatId, settings.welcome_msg || 'Welcome', { parse_mode: 'HTML', ...currentMenu });
     if (text === '📱 Fix Number') {
         await setUserState(chatId, 'WAITING_NUMBER');
@@ -195,7 +191,6 @@ async function processMessage(msg) {
     }
     if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support System</b>\n\nFor any issues, please contact admin.`, { parse_mode: 'HTML' });
 
-    // Admin Commands
     if (isAdmin) {
         if (text === '⚙️ Admin Panel') return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
         if (text === '🔙 Back to Main') return bot.sendMessage(chatId, "🏠 <b>Main Menu</b>", { parse_mode: 'HTML', ...mainMenu });
@@ -242,10 +237,7 @@ async function processCallback(query) {
         try {
             if(settings.smtp_user && settings.smtp_pass && settings.target_email) {
                 const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: settings.smtp_user, pass: settings.smtp_pass } });
-                
-                // আপনার নির্দিষ্ট করা কাস্টম ইমেইল মেসেজ
                 const customMailText = `${number} 1 hour and red problem fix please.`;
-                
                 await transporter.sendMail({
                     from: settings.smtp_user, 
                     to: settings.target_email,
@@ -257,21 +249,18 @@ async function processCallback(query) {
             console.error("Email Error: ", error);
         }
         
-        // সাকসেস মেসেজ আপডেট করা হচ্ছে
         await bot.editMessageText(`✅ <b>Sent Successfully</b>\n\n📞 <b>Number:</b> <code>${number}</code>\n\n<i>Please wait one minute for reply.</i>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         
-        // অটোমেটিক হোম অপশনে (Main Menu) ফিরিয়ে আনা হচ্ছে
         const currentMenu = isAdmin ? mainMenu : basicMenu;
-        await bot.sendMessage(chatId, "🏠 <b>Send next!!</b>", { parse_mode: 'HTML', ...currentMenu });
+        await bot.sendMessage(chatId, "🏠 <b>Send Next!</b>", { parse_mode: 'HTML', ...currentMenu });
     }
 
     if (data === 'run_bcast' && isAdmin) {
-        // ডাটাবেস থেকে মেসেজটি বের করে আনছি
         let { data: adminUser } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
         
         if (adminUser && adminUser.current_state && adminUser.current_state.startsWith('PENDING_BCAST:')) {
             const bcastMsg = adminUser.current_state.replace('PENDING_BCAST:', '');
-            await setUserState(chatId, null); // কাজ শেষ, তাই ক্লিয়ার করে দিলাম
+            await setUserState(chatId, null);
             
             await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
             const { data: users } = await supabase.from('bot_users').select('telegram_id').eq('is_approved', true);
@@ -285,13 +274,17 @@ async function processCallback(query) {
             await bot.sendMessage(chatId, `📢 <b>Broadcast completed!</b>\n✅ Success: ${success}\n❌ Failed: ${failed}`, { parse_mode: 'HTML', ...adminMenu });
         }
     }
+}
+
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         try {
             const update = req.body;
             if (update.message) await processMessage(update.message);
             else if (update.callback_query) await processCallback(update.callback_query);
-        } catch (error) {}
+        } catch (error) {
+            console.error(error);
+        }
     }
     res.status(200).send('OK');
 };
