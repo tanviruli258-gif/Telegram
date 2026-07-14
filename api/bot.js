@@ -48,7 +48,7 @@ bot.on('message', async (msg) => {
 
     if (text === '📱 Fix number') {
         userStates[chatId] = 'WAITING_FOR_NUMBER';
-        return bot.sendMessage(chatId, "📞 নম্বরটি দিন:");
+        return bot.sendMessage(chatId, "📞 Input you number:");
     }
 
     if (userStates[chatId] === 'WAITING_FOR_NUMBER') {
