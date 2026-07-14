@@ -12,7 +12,7 @@ const TARGET_EMAIL = 'xtremepremiumts@gmail.com';
 
 // Supabase কনফিগারেশন (আপনার Key টি ভুল ছিল, তাই সেভ হচ্ছিল না। সঠিক Key বসাবেন)
 const supabaseUrl = 'https://ixptyhyaciqcymkejiey.supabase.co';
-const supabaseKey = 'Sb_publishable_M67GpIfk5KYume0uNQZOUQ_hvn79_1v'; // দয়া করে Supabase থেকে সঠিক eyJ... Key টি এনে এখানে বসান
+const supabaseKey = 'sb_secret_M7uEqVvs8kE7lcPTQ4B-7Q_p7ofigAH'; // দয়া করে Supabase থেকে সঠিক eyJ... Key টি এনে এখানে বসান
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 let cachedSettings = null; 
