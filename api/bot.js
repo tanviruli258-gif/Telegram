@@ -261,7 +261,7 @@ async function processCallback(query) {
         
         // অটোমেটিক হোম অপশনে (Main Menu) ফিরিয়ে আনা হচ্ছে
         const currentMenu = isAdmin ? mainMenu : basicMenu;
-        await bot.sendMessage(chatId, "🏠 <b>মূল মেনুতে ফিরে এসেছি!</b>", { parse_mode: 'HTML', ...currentMenu });
+        await bot.sendMessage(chatId, "🏠 <b>Send next!!</b>", { parse_mode: 'HTML', ...currentMenu });
     }
 
     if (data.startsWith('bcast_confirm_') && isAdmin) {
