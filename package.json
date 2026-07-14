@@ -1,11 +1,11 @@
 {
-  "name": "telegram-support-bot",
+  "name": "telegram-pro-bot",
   "version": "1.0.0",
-  "description": "Telegram bot with Supabase and Vercel",
+  "description": "Advanced Telegram Bot for Tanvir Siyam",
   "main": "api/bot.js",
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
-    "nodemailer": "^6.9.13",
-    "@supabase/supabase-js": "^2.39.8"
+    "@supabase/supabase-js": "^2.39.3",
+    "nodemailer": "^6.9.9"
   }
 }
