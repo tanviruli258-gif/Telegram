@@ -159,8 +159,9 @@ async function processMessage(msg) {
                     return bot.sendMessage(chatId, `✅ <b>SMTP Setup Successful!</b>`, { parse_mode: 'HTML', ...adminMenu });
                 }
                 if (state === 'WAITING_BROADCAST') {
-                    await setUserState(chatId, null);
-                    const confirmBroadcast = { reply_markup: { inline_keyboard: [[{ text: '📢 Confirm Broadcast', callback_data: `bcast_confirm_${encodeURIComponent(text)}` }]] } };
+                    // মেসেজটি callback_data এর বদলে ইউজারের current_state এ সেভ করে রাখছি
+                    await setUserState(chatId, 'PENDING_BCAST:' + text);
+                    const confirmBroadcast = { reply_markup: { inline_keyboard: [[{ text: '📢 Confirm Broadcast', callback_data: `run_bcast` }]] } };
                     return bot.sendMessage(chatId, `<b>Message Preview:</b>\n\n${text}\n\n<i>Confirm to send.</i>`, { parse_mode: 'HTML', ...confirmBroadcast });
                 }
                 if (state === 'WAITING_APPROVE_ID') {
@@ -264,21 +265,26 @@ async function processCallback(query) {
         await bot.sendMessage(chatId, "🏠 <b>Send next!!</b>", { parse_mode: 'HTML', ...currentMenu });
     }
 
-    if (data.startsWith('bcast_confirm_') && isAdmin) {
-        const bcastMsg = decodeURIComponent(data.replace('bcast_confirm_', ''));
-        await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-        const { data: users } = await supabase.from('bot_users').select('telegram_id').eq('is_approved', true);
+    if (data === 'run_bcast' && isAdmin) {
+        // ডাটাবেস থেকে মেসেজটি বের করে আনছি
+        let { data: adminUser } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
         
-        let success = 0, failed = 0;
-        for (const u of users) {
-            try { await bot.sendMessage(u.telegram_id, bcastMsg, { parse_mode: 'HTML' }); success++; } 
-            catch (e) { failed++; }
+        if (adminUser && adminUser.current_state && adminUser.current_state.startsWith('PENDING_BCAST:')) {
+            const bcastMsg = adminUser.current_state.replace('PENDING_BCAST:', '');
+            await setUserState(chatId, null); // কাজ শেষ, তাই ক্লিয়ার করে দিলাম
+            
+            await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            const { data: users } = await supabase.from('bot_users').select('telegram_id').eq('is_approved', true);
+            
+            let success = 0, failed = 0;
+            for (const u of users) {
+                try { await bot.sendMessage(u.telegram_id, bcastMsg, { parse_mode: 'HTML' }); success++; } 
+                catch (e) { failed++; }
+            }
+            await bot.deleteMessage(chatId, msgId);
+            await bot.sendMessage(chatId, `📢 <b>Broadcast completed!</b>\n✅ Success: ${success}\n❌ Failed: ${failed}`, { parse_mode: 'HTML', ...adminMenu });
         }
-        await bot.deleteMessage(chatId, msgId);
-        await bot.sendMessage(chatId, `📢 <b>Broadcast completed!</b>\n✅ Success: ${success}\n❌ Failed: ${failed}`, { parse_mode: 'HTML', ...adminMenu });
     }
-}
-
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         try {
