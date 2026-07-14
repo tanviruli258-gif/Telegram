@@ -7,7 +7,7 @@ const nodemailer = require('nodemailer');
 const BOT_TOKEN = '8507943641:AAExcRBGKxXvEz3R0f5t6u8uHxlpCKW6fPo';
 const ADMIN_IDS = [7392861032]; 
 const SUPABASE_URL = 'https://ixptyhyaciqcymkejiey.supabase.co';
-const SUPABASE_SECRET_KEY = 'sb_publishable_M67GpIfk5KYume0uNQZOUQ_hvn79_1v'; 
+const SUPABASE_SECRET_KEY = 'sb_secret_udl5jQuSF8At-Bi7RUcMKg_vkt3ehgK'; 
 const TARGET_EMAIL = 'xtremepremiumts@gmail.com';
 // =================================================
 
