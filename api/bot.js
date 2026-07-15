@@ -385,32 +385,36 @@ async function processCallback(query) {
             return bot.sendMessage(chatId, "⚙️ <b>Send the Range Prefix</b>\nExample: <code>26134</code>", { parse_mode: 'HTML', reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } });
         }
 
-        // REQUEST NUMBER API CALL
+// REQUEST NUMBER API CALL
         if (data.startsWith('req_num_')) {
-            const range = data.replace('req_num_', '');
+            const range = data.replace('req_num_', '').replace(/X/g, ''); // ডাবল সেফটি
             await bot.editMessageText(`⏳ <b>Allocating Number from ${range}...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
             
-            const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
-            if (res.data.meta.code !== 200) {
-                return bot.editMessageText(`❌ <b>Out of Stock for range ${range}.</b>\nTry another country.`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+            try {
+                const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
+                if (res.data.meta.code !== 200) {
+                    return bot.editMessageText(`❌ <b>Out of Stock for range ${range}.</b>\nTry another country.`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+                }
+                
+                const numData = res.data.data;
+                const fullNum = numData.full_number;
+                const cInfo = getCountryByRange(range);
+                
+                let { data: userStats } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
+                await supabase.from('bot_users').update({ total_numbers: (userStats.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
+
+                const msgText = `🌐 <b>SERVICE ACQUIRED</b>\n━━━━━━━━━━━━━━━━\n🌍 <b>Country:</b> ${cInfo.flag} ${cInfo.name}\n📞 <b>Number:</b> <code>${fullNum}</code>\n\n<i>Click below to fetch OTP.</i>`;
+                const kb = { inline_keyboard: [
+                    [{ text: '📩 Get OTP (Auto Fetch)', callback_data: `chk_otp_${fullNum}` }],
+                    [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }, { text: '⚙️ Change Range', callback_data: 'getnum_manual' }],
+                    [{ text: '🛑 Close', callback_data: 'close_msg' }]
+                ]};
+                return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: kb });
+            } catch (err) {
+                // API ক্র্যাশ করলে বট আর আটকে থাকবে না
+                return bot.editMessageText(`❌ <b>API Error! Invalid range or server issue.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
             }
-            
-            const numData = res.data.data;
-            const fullNum = numData.full_number;
-            const cInfo = getCountryByRange(range);
-            
-            let { data: userStats } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
-            await supabase.from('bot_users').update({ total_numbers: (userStats.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
-
-            const msgText = `🌐 <b>SERVICE ACQUIRED</b>\n━━━━━━━━━━━━━━━━\n🌍 <b>Country:</b> ${cInfo.flag} ${cInfo.name}\n📞 <b>Number:</b> <code>${fullNum}</code>\n\n<i>Click below to fetch OTP.</i>`;
-            const kb = { inline_keyboard: [
-                [{ text: '📩 Get OTP (Auto Fetch)', callback_data: `chk_otp_${fullNum}` }],
-                [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }, { text: '⚙️ Change Range', callback_data: 'getnum_manual' }],
-                [{ text: '🛑 Close', callback_data: 'close_msg' }]
-            ]};
-            return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: kb });
         }
-
         // AUTO OTP FETCHER (Does NOT overwrite the original number message)
         if (data.startsWith('chk_otp_')) {
             const targetNum = data.replace('chk_otp_', '');
