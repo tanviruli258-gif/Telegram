@@ -21,7 +21,6 @@ const adminMainMenu = { reply_markup: { keyboard: [['📱 Fix Number', '🔢 Get
 const userMainMenu = { reply_markup: { keyboard: [['📱 Fix Number', '🔢 Get Number'], ['🔐 2FA Generator', '📊 My Stats'], ['🎧 Support']], resize_keyboard: true } };
 const cancelMenu = { reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } };
 
-// Organized Admin Panel
 const adminMenu = { reply_markup: { keyboard: [['⚙️ Bot Config', '🌐 API & Email'], ['👥 User Manage', '📈 Global Stats'], ['🔙 Back to Main']], resize_keyboard: true } };
 const botConfigMenu = { reply_markup: { keyboard: [['📝 WLC MESSAGE EDIT', '⚙️ BOT ON/OFF'], ['📊 LIMIT USER', '🔙 Admin Home']], resize_keyboard: true } };
 const apiEmailMenu = { reply_markup: { keyboard: [['🎯 Set Target Email', '📧 SMTP Setup'], ['🔌 API Setup', '🔙 Admin Home']], resize_keyboard: true } };
@@ -72,7 +71,6 @@ async function processMessage(msg) {
     const settings = await getSettings();
     const currentMenu = isAdmin ? adminMainMenu : userMainMenu;
 
-    // BOT ON/OFF System
     if (!settings.bot_status && !isAdmin) {
         return bot.sendMessage(chatId, "⚠️ <b>Bot is currently under maintenance. Please try again later.</b>", { parse_mode: 'HTML' });
     }
@@ -99,7 +97,6 @@ async function processMessage(msg) {
         return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
     }
 
-    // STATE MANAGEMENT
     if (user.current_state) {
         const state = user.current_state;
         
@@ -140,9 +137,11 @@ async function processMessage(msg) {
 
         if (state === 'WAITING_MANUAL_RANGE') {
             await setUserState(chatId, null);
-            const range = text.trim();
-            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML', ...currentMenu });
-            processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
+            const range = text.trim().toUpperCase().replace(/X/g, ''); 
+            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML' });
+            
+            // FIXED: Added 'await' so Vercel doesn't kill the process before API is called!
+            await processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
             return;
         }
 
@@ -175,7 +174,6 @@ async function processMessage(msg) {
         }
     }
 
-    // MAIN COMMANDS
     if (text === '/start') return bot.sendMessage(chatId, settings.welcome_msg || 'Welcome to the Bot!', { parse_mode: 'HTML', ...currentMenu });
     
     if (text === '📱 Fix Number') {
@@ -205,7 +203,6 @@ async function processMessage(msg) {
 
     if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support System</b>\nFor any issues, contact admin.`, { parse_mode: 'HTML' });
 
-    // ADMIN PANELS
     if (isAdmin) {
         if (text === '⚙️ Admin Panel') return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
         if (text === '⚙️ Bot Config') return bot.sendMessage(chatId, "⚙️ <b>Bot Configuration</b>", { parse_mode: 'HTML', ...botConfigMenu });
@@ -218,7 +215,6 @@ async function processMessage(msg) {
             return bot.sendMessage(chatId, `✅ <b>Bot is now ${newStatus ? 'ON' : 'OFF'}.</b>`, { parse_mode: 'HTML' });
         }
         
-        // GLOBAL STATS REVENUE
         if (text === '📈 Global Stats') {
             const { data: allUsers } = await supabase.from('bot_users').select('total_otps, total_numbers');
             let totalO = 0, totalN = 0;
@@ -251,7 +247,6 @@ async function processCallback(query) {
         if (data === 'dummy') return bot.answerCallbackQuery(query.id, { text: 'Copied!' });
         if (data === 'close_msg') return bot.deleteMessage(chatId, msgId).catch(()=>{});
 
-        // BROADCAST (To ALL users)
         if (data === 'run_bcast' && ADMIN_IDS.includes(Number(chatId))) {
             let { data: au } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
             if (au && au.current_state && au.current_state.startsWith('PENDING_BCAST:')) {
@@ -265,7 +260,6 @@ async function processCallback(query) {
             }
         }
 
-        // FIX NUMBER EMAIL
         if (data.startsWith('sendmsg_')) {
             const number = data.split('_')[1];
             let { data: user } = await supabase.from('bot_users').select('sms_count').eq('telegram_id', chatId).single();
@@ -279,126 +273,79 @@ async function processCallback(query) {
             return bot.sendMessage(chatId, `✅ <b>Sent Successfully</b>\n📞 Number: <code>${number}</code>`, { parse_mode: 'HTML' });
         }
 
-        // LIVE TRAFFIC (Real Data Calculation)
         if (data === 'live_traffic') {
             await bot.editMessageText(`⏳ <b>Analyzing Live Panel Data...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-            
-            try {
-                // একই সাথে Live Access এবং Console (Live Hits) এপিআই কল করা হচ্ছে
-                const [accessRes, consoleRes] = await Promise.all([
-                    axios.get(`${API_BASE_URL}/liveaccess`, { headers }),
-                    axios.get(`${API_BASE_URL}/console`, { headers })
-                ]);
-                
-                // Console ডাটা থেকে রিয়েল হিট (SMS) কাউন্ট করা
-                const hitCounts = {};
-                if (consoleRes.data.data && consoleRes.data.data.hits) {
-                    consoleRes.data.data.hits.forEach(hit => {
-                        hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1;
-                    });
-                }
-
-                let msg = `🚦 <b>Live Traffic Status</b>\n━━━━━━━━━━━━━━━━━\n`;
-                const activeServices = accessRes.data.data.services.filter(s => s.ranges && s.ranges.length > 0).slice(0, 4);
-                
-                if (activeServices.length === 0) {
-                    msg += `❌ No active traffic on panel right now.`;
-                } else {
-                    activeServices.forEach(srv => {
-                        msg += `📱 <b>${srv.sid.toUpperCase()}</b>\n`;
-                        srv.ranges.slice(0, 8).forEach(r => {
-                            const c = getCountryByRange(r);
-                            const hits = hitCounts[r] || 0; // রিয়েল হিট ডাটা
-                            
-                            // আসল হিট অনুযায়ী স্ট্যাটাস সেট করা
-                            let status = '';
-                            if (hits >= 4) status = 'High 🟢';
-                            else if (hits >= 2) status = 'Medium 🟡';
-                            else status = 'Low 🔴';
-                            
-                            msg += `${c.flag} ${c.name} : <code>${r}</code> (${status})\n`;
-                        });
-                        msg += '\n';
-                    });
-                }
-                return bot.editMessageText(msg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close_msg' }]] } });
-            } catch (err) {
-                return bot.editMessageText(`❌ <b>Failed to fetch live traffic data.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            const hitCounts = {};
+            if (consoleRes.data.data && consoleRes.data.data.hits) {
+                consoleRes.data.data.hits.forEach(hit => { hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1; });
             }
+
+            let msg = `🚦 <b>Live Traffic Status</b>\n━━━━━━━━━━━━━━━━━\n`;
+            const activeServices = accessRes.data.data.services.filter(s => s.ranges && s.ranges.length > 0).slice(0, 4);
+            if (activeServices.length === 0) { msg += `❌ No active traffic on panel right now.`; } 
+            else {
+                activeServices.forEach(srv => {
+                    msg += `📱 <b>${srv.sid.toUpperCase()}</b>\n`;
+                    srv.ranges.slice(0, 8).forEach(r => {
+                        const c = getCountryByRange(r);
+                        const hits = hitCounts[r] || 0;
+                        let status = '';
+                        if (hits >= 4) status = 'High 🟢';
+                        else if (hits >= 2) status = 'Medium 🟡';
+                        else status = 'Low 🔴';
+                        msg += `${c.flag} ${c.name} : <code>${r}</code> (${status})\n`;
+                    });
+                    msg += '\n';
+                });
+            }
+            return bot.editMessageText(msg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close_msg' }]] } });
         }
 
-        // GET NUMBER AUTO (Strictly Top High Traffic)
         if (data === 'getnum_auto') {
             await bot.editMessageText(`⏳ <b>Scanning High Traffic Ranges...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            const hitCounts = {};
+            if (consoleRes.data.data && consoleRes.data.data.hits) { consoleRes.data.data.hits.forEach(hit => { hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1; }); }
+
+            const tg = accessRes.data.data.services.find(s => s.sid.toLowerCase().includes('telegram') || s.sid.toLowerCase().includes('whatsapp') || s.sid.toLowerCase().includes('facebook'));
+            if(!tg || !tg.ranges || tg.ranges.length === 0) { return bot.editMessageText("❌ No live traffic found.", { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]] }}); }
             
-            try {
-                const [accessRes, consoleRes] = await Promise.all([
-                    axios.get(`${API_BASE_URL}/liveaccess`, { headers }),
-                    axios.get(`${API_BASE_URL}/console`, { headers })
-                ]);
-                
-                const hitCounts = {};
-                if (consoleRes.data.data && consoleRes.data.data.hits) {
-                    consoleRes.data.data.hits.forEach(hit => {
-                        hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1;
-                    });
-                }
+            let validRanges = tg.ranges.map(r => ({ range: r, hits: hitCounts[r] || 0 })).filter(item => item.hits >= 2).sort((a, b) => b.hits - a.hits).map(item => item.range).slice(0, 4);
+            if (validRanges.length === 0) { validRanges = tg.ranges.slice(0, 2); }
 
-                const tg = accessRes.data.data.services.find(s => s.sid.toLowerCase().includes('telegram') || s.sid.toLowerCase().includes('whatsapp') || s.sid.toLowerCase().includes('facebook'));
-                
-                if(!tg || !tg.ranges || tg.ranges.length === 0) {
-                    return bot.editMessageText("❌ No live traffic found.", { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]] }});
-                }
-                
-                // ফিল্টার: শুধুমাত্র যাদের রিয়েল হিট আছে (High/Medium) তাদের আলাদা করা এবং সর্বোচ্চ হিট অনুযায়ী সাজানো
-                let validRanges = tg.ranges.map(r => ({ range: r, hits: hitCounts[r] || 0 }))
-                                           .filter(item => item.hits >= 2) // কমপক্ষে ২টা হিট থাকলে তবেই লিস্টে যাবে
-                                           .sort((a, b) => b.hits - a.hits) // সবচেয়ে বেশি হিট যার, সে আগে থাকবে
-                                           .map(item => item.range)
-                                           .slice(0, 4); // সর্বোচ্চ ৪টা দেশ যাবে
-                
-                // যদি প্যানেলে এই মুহূর্তে হিট একদম কম থাকে, তবে ডিফল্টভাবে প্রথম ২টা রেঞ্জ দেখাবে
-                if (validRanges.length === 0) {
-                    validRanges = tg.ranges.slice(0, 2);
-                }
-
-                let btns = [], row = [];
-                validRanges.forEach(r => {
-                    const c = getCountryByRange(r);
-                    row.push({ text: `${c.flag} ${c.name}`, callback_data: `req_num_${r.replace('XXX','')}` });
-                    if(row.length === 2) { btns.push(row); row = []; }
-                });
-                if(row.length > 0) btns.push(row);
-                btns.push([{ text: '🛑 Close', callback_data: 'close_msg' }]);
-                
-                return bot.editMessageText(`🌍 <b>Select High Traffic Country:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
-
-            } catch (err) {
-                 return bot.editMessageText(`❌ <b>Error processing live ranges.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-            }
+            let btns = [], row = [];
+            validRanges.forEach(r => {
+                const c = getCountryByRange(r);
+                row.push({ text: `${c.flag} ${c.name}`, callback_data: `req_num_${r.replace('XXX','')}` });
+                if(row.length === 2) { btns.push(row); row = []; }
+            });
+            if(row.length > 0) btns.push(row);
+            btns.push([{ text: '🛑 Close', callback_data: 'close_msg' }]);
+            return bot.editMessageText(`🌍 <b>Select High Traffic Country:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
         }
 
-        if (state === 'WAITING_MANUAL_RANGE') {
-            await setUserState(chatId, null);
-            // স্মার্ট ফিল্টার: ইউজার XXX দিলেও সেটা অটোমেটিক রিমুভ হয়ে যাবে
-            const range = text.trim().toUpperCase().replace(/X/g, ''); 
-            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML' });
-            processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
-            return;
+        if (data === 'getnum_manual') {
+            await setUserState(chatId, 'WAITING_MANUAL_RANGE');
+            await bot.deleteMessage(chatId, msgId);
+            return bot.sendMessage(chatId, "⚙️ <b>Send the Range Prefix</b>\nExample: <code>26134</code>", { parse_mode: 'HTML', reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } });
         }
 
-// REQUEST NUMBER API CALL
         if (data.startsWith('req_num_')) {
-            const range = data.replace('req_num_', '').replace(/X/g, ''); // ডাবল সেফটি
+            const range = data.replace('req_num_', '').replace(/X/g, '');
             await bot.editMessageText(`⏳ <b>Allocating Number from ${range}...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
             
             try {
                 const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
-                if (res.data.meta.code !== 200) {
+                if (res.data && res.data.meta && res.data.meta.code !== 200) {
                     return bot.editMessageText(`❌ <b>Out of Stock for range ${range}.</b>\nTry another country.`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
                 }
                 
                 const numData = res.data.data;
+                if (!numData || !numData.full_number) {
+                     return bot.editMessageText(`❌ <b>Failed to fetch number. Out of stock or invalid range.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+                }
+
                 const fullNum = numData.full_number;
                 const cInfo = getCountryByRange(range);
                 
@@ -413,15 +360,13 @@ async function processCallback(query) {
                 ]};
                 return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: kb });
             } catch (err) {
-                // API ক্র্যাশ করলে বট আর আটকে থাকবে না
-                return bot.editMessageText(`❌ <b>API Error! Invalid range or server issue.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+                console.error("req_num error:", err.message);
+                return bot.editMessageText(`❌ <b>API Error! Server issue or invalid range.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
             }
         }
-        // AUTO OTP FETCHER (Does NOT overwrite the original number message)
+
         if (data.startsWith('chk_otp_')) {
             const targetNum = data.replace('chk_otp_', '');
-            
-            // Send a NEW message for OTP processing so the number message stays intact
             const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Fetching OTP for <code>${targetNum}</code>...</b>\n<i>Please wait up to 15 seconds</i>`, { parse_mode: 'HTML' });
             
             let otpFound = null;
@@ -439,7 +384,6 @@ async function processCallback(query) {
             if (otpFound) {
                 let { data: userStats } = await supabase.from('bot_users').select('total_otps').eq('telegram_id', chatId).single();
                 await supabase.from('bot_users').update({ total_otps: (userStats.total_otps || 0) + 1 }).eq('telegram_id', chatId);
-
                 const smsg = `✅ <b>OTP RECEIVED!</b>\n━━━━━━━━━━━━━━━━\n📞 Number: <code>${targetNum}</code>\n💬 OTP: <code>${otpFound.message}</code>`;
                 return bot.editMessageText(smsg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: `📋 Copy Code: ${otpFound.message}`, callback_data: 'dummy' }]]} });
             } else {
@@ -448,7 +392,7 @@ async function processCallback(query) {
             }
         }
 
-    } catch (err) { console.log(err.message); }
+    } catch (err) { console.error("Process Callback Error:", err.message); }
 }
 
 module.exports = async (req, res) => {
