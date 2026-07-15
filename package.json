@@ -1,0 +1,20 @@
+{
+  "name": "telegram-admin-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready Telegram bot with Supabase-backed admin panel, approval system, invite system, spam protection, and broadcast tools. Deployable on Vercel serverless functions.",
+  "type": "module",
+  "engines": {
+    "node": ">=18.x"
+  },
+  "scripts": {
+    "start": "node api/bot.js",
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "axios": "^1.7.7",
+    "express": "^4.21.0",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
