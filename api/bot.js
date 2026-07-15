@@ -1,41 +1,3 @@
--- Create bot_users table
-CREATE TABLE IF NOT EXISTS bot_users (
-    telegram_id bigint PRIMARY KEY,
-    is_approved boolean DEFAULT false,
-    is_admin boolean DEFAULT false,
-    is_banned boolean DEFAULT false,
-    sms_count integer DEFAULT 0,
-    last_reset text,
-    current_state text,
-    total_numbers integer DEFAULT 0,
-    total_otps integer DEFAULT 0
-);
-
--- Create bot_settings table
-CREATE TABLE IF NOT EXISTS bot_settings (
-    id integer PRIMARY KEY DEFAULT 1,
-    welcome_msg text DEFAULT 'Welcome to the Bot!',
-    bot_status boolean DEFAULT true,
-    default_msg_limit integer DEFAULT 2,
-    target_email text,
-    smtp_user text,
-    smtp_pass text,
-    mauth_api text
-);
-
--- Insert default settings row if it doesn't exist
-INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT DO NOTHING;
-
--- Create bot_invites table
-CREATE TABLE IF NOT EXISTS bot_invites (
-    code text PRIMARY KEY,
-    max_uses integer DEFAULT 1,
-    current_uses integer DEFAULT 0,
-    is_active boolean DEFAULT true
-);
-```eof
-
-```javascript:api/bot.js
 process.env.NTBA_FIX_319 = 1;
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
@@ -181,7 +143,6 @@ async function processMessage(msg) {
         if (state === 'WAITING_MANUAL_RANGE') {
             await setUserState(chatId, null);
             const range = text.trim().toUpperCase().replace(/X/g, ''); 
-            // Send message and restore the main menu keyboard (Removes 'Cancel' button stuck issue)
             const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML', ...currentMenu });
             await processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
             return;
@@ -545,15 +506,3 @@ module.exports = async (req, res) => {
     }
     res.status(200).send('OK');
 };
-```eof
-
-**আপনার কাজ:**
-১. `database.sql` ফাইলটি আপনার Supabase-এর SQL Editor-এ রান করে নিন।
-২. `api/bot.js` কোডটি গিটহাবে আপনার আগের কোডের জায়গায় রিপ্লেস করে সেভ করে নিন।
-৩. Vercel-এর Environment Variables অপশনে গিয়ে নিচের ভ্যালুগুলো যোগ করে দিন:
-*   `BOT_TOKEN`: আপনার বটের টোকেন
-*   `SUPABASE_URL`: আপনার ডাটাবেস URL
-*   `SUPABASE_SECRET_KEY`: আপনার ডাটাবেস API Key
-*   `ADMIN_IDS`: আপনার এডমিন আইডি (যেমন: 7392861032)
-
-এরপর Vercel নিজে থেকেই নতুন করে ডিপ্লয় হয়ে যাবে। ইনশাআল্লাহ, এবার কোনো বাটন বা ওটিপি মিস হবে না!
