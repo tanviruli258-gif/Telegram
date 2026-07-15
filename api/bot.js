@@ -279,39 +279,103 @@ async function processCallback(query) {
             return bot.sendMessage(chatId, `✅ <b>Sent Successfully</b>\n📞 Number: <code>${number}</code>`, { parse_mode: 'HTML' });
         }
 
-        // LIVE TRAFFIC
+        // LIVE TRAFFIC (Real Data Calculation)
         if (data === 'live_traffic') {
-            await bot.editMessageText(`⏳ <b>Loading Traffic...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-            const res = await axios.get(`${API_BASE_URL}/liveaccess`, { headers });
-            let msg = `🚦 <b>Live Traffic Update</b>\n━━━━━━━━━━━━━━━━━\n`;
-            res.data.data.services.slice(0, 3).forEach(srv => {
-                msg += `📱 <b>${srv.sid.toUpperCase()}</b>\n`;
-                srv.ranges.slice(0, 5).forEach((r, idx) => {
-                    const c = getCountryByRange(r);
-                    const status = idx < 2 ? 'High 🟢' : 'Medium 🟡';
-                    msg += `${c.flag} ${c.name} : <code>${r}</code> (${status})\n`;
-                });
-                msg += '\n';
-            });
-            return bot.editMessageText(msg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close_msg' }]] } });
+            await bot.editMessageText(`⏳ <b>Analyzing Live Panel Data...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            
+            try {
+                // একই সাথে Live Access এবং Console (Live Hits) এপিআই কল করা হচ্ছে
+                const [accessRes, consoleRes] = await Promise.all([
+                    axios.get(`${API_BASE_URL}/liveaccess`, { headers }),
+                    axios.get(`${API_BASE_URL}/console`, { headers })
+                ]);
+                
+                // Console ডাটা থেকে রিয়েল হিট (SMS) কাউন্ট করা
+                const hitCounts = {};
+                if (consoleRes.data.data && consoleRes.data.data.hits) {
+                    consoleRes.data.data.hits.forEach(hit => {
+                        hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1;
+                    });
+                }
+
+                let msg = `🚦 <b>Live Traffic Status</b>\n━━━━━━━━━━━━━━━━━\n`;
+                const activeServices = accessRes.data.data.services.filter(s => s.ranges && s.ranges.length > 0).slice(0, 4);
+                
+                if (activeServices.length === 0) {
+                    msg += `❌ No active traffic on panel right now.`;
+                } else {
+                    activeServices.forEach(srv => {
+                        msg += `📱 <b>${srv.sid.toUpperCase()}</b>\n`;
+                        srv.ranges.slice(0, 8).forEach(r => {
+                            const c = getCountryByRange(r);
+                            const hits = hitCounts[r] || 0; // রিয়েল হিট ডাটা
+                            
+                            // আসল হিট অনুযায়ী স্ট্যাটাস সেট করা
+                            let status = '';
+                            if (hits >= 4) status = 'High 🟢';
+                            else if (hits >= 2) status = 'Medium 🟡';
+                            else status = 'Low 🔴';
+                            
+                            msg += `${c.flag} ${c.name} : <code>${r}</code> (${status})\n`;
+                        });
+                        msg += '\n';
+                    });
+                }
+                return bot.editMessageText(msg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close_msg' }]] } });
+            } catch (err) {
+                return bot.editMessageText(`❌ <b>Failed to fetch live traffic data.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            }
         }
 
-        // GET NUMBER AUTO (Limit to top 4-5)
+        // GET NUMBER AUTO (Strictly Top High Traffic)
         if (data === 'getnum_auto') {
-            await bot.editMessageText(`⏳ <b>Scanning Live Services...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-            const res = await axios.get(`${API_BASE_URL}/liveaccess`, { headers });
-            const tg = res.data.data.services.find(s => s.sid.toLowerCase().includes('telegram') || s.sid.toLowerCase().includes('whatsapp') || s.sid.toLowerCase().includes('facebook'));
-            if(!tg || tg.ranges.length === 0) return bot.editMessageText("❌ No live traffic found.", { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            await bot.editMessageText(`⏳ <b>Scanning High Traffic Ranges...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
             
-            let btns = [], row = [];
-            tg.ranges.slice(0, 6).forEach(r => {
-                const c = getCountryByRange(r);
-                row.push({ text: `${c.flag} ${c.name}`, callback_data: `req_num_${r.replace('XXX','')}` });
-                if(row.length === 2) { btns.push(row); row = []; }
-            });
-            if(row.length > 0) btns.push(row);
-            btns.push([{ text: '🛑 Close', callback_data: 'close_msg' }]);
-            return bot.editMessageText(`🌍 <b>Select High Traffic Country:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
+            try {
+                const [accessRes, consoleRes] = await Promise.all([
+                    axios.get(`${API_BASE_URL}/liveaccess`, { headers }),
+                    axios.get(`${API_BASE_URL}/console`, { headers })
+                ]);
+                
+                const hitCounts = {};
+                if (consoleRes.data.data && consoleRes.data.data.hits) {
+                    consoleRes.data.data.hits.forEach(hit => {
+                        hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1;
+                    });
+                }
+
+                const tg = accessRes.data.data.services.find(s => s.sid.toLowerCase().includes('telegram') || s.sid.toLowerCase().includes('whatsapp') || s.sid.toLowerCase().includes('facebook'));
+                
+                if(!tg || !tg.ranges || tg.ranges.length === 0) {
+                    return bot.editMessageText("❌ No live traffic found.", { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]] }});
+                }
+                
+                // ফিল্টার: শুধুমাত্র যাদের রিয়েল হিট আছে (High/Medium) তাদের আলাদা করা এবং সর্বোচ্চ হিট অনুযায়ী সাজানো
+                let validRanges = tg.ranges.map(r => ({ range: r, hits: hitCounts[r] || 0 }))
+                                           .filter(item => item.hits >= 2) // কমপক্ষে ২টা হিট থাকলে তবেই লিস্টে যাবে
+                                           .sort((a, b) => b.hits - a.hits) // সবচেয়ে বেশি হিট যার, সে আগে থাকবে
+                                           .map(item => item.range)
+                                           .slice(0, 4); // সর্বোচ্চ ৪টা দেশ যাবে
+                
+                // যদি প্যানেলে এই মুহূর্তে হিট একদম কম থাকে, তবে ডিফল্টভাবে প্রথম ২টা রেঞ্জ দেখাবে
+                if (validRanges.length === 0) {
+                    validRanges = tg.ranges.slice(0, 2);
+                }
+
+                let btns = [], row = [];
+                validRanges.forEach(r => {
+                    const c = getCountryByRange(r);
+                    row.push({ text: `${c.flag} ${c.name}`, callback_data: `req_num_${r.replace('XXX','')}` });
+                    if(row.length === 2) { btns.push(row); row = []; }
+                });
+                if(row.length > 0) btns.push(row);
+                btns.push([{ text: '🛑 Close', callback_data: 'close_msg' }]);
+                
+                return bot.editMessageText(`🌍 <b>Select High Traffic Country:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
+
+            } catch (err) {
+                 return bot.editMessageText(`❌ <b>Error processing live ranges.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            }
         }
 
         // GET NUMBER MANUAL
