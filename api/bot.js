@@ -419,13 +419,16 @@ async function processCallback(query) {
             return bot.editMessageText(`🌍 <b>Select Country for ${selectedService.toUpperCase()}:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
         }
 
-        // MANUAL RANGE INPUT
-        if (data === 'getnum_manual') {
-            await setUserState(chatId, 'WAITING_MANUAL_RANGE');
-            await bot.deleteMessage(chatId, msgId);
-            return bot.sendMessage(chatId, "⚙️ <b>Send the Range Prefix</b>\nExample: <code>26134</code>", { parse_mode: 'HTML', reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } });
-        }
-
+        if (state === 'WAITING_MANUAL_RANGE') {
+            await setUserState(chatId, null);
+            const range = text.trim().toUpperCase().replace(/X/g, ''); 
+            
+            // এখানে currentMenu বসানো হয়েছে, যাতে Cancel বাটন সরে গিয়ে হোমপেজের মেনু চলে আসে
+            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML', ...currentMenu });
+            
+            await processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
+            return;
+                                                                    }
         // REQUEST NUMBER API CALL
         if (data.startsWith('req_num_')) {
             const range = data.replace('req_num_', '').replace(/X/g, '');
@@ -464,28 +467,39 @@ async function processCallback(query) {
         // AUTO OTP FETCHER
         if (data.startsWith('chk_otp_')) {
             const targetNum = data.replace('chk_otp_', '');
-            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Fetching OTP for <code>${targetNum}</code>...</b>\n<i>Please wait up to 15 seconds</i>`, { parse_mode: 'HTML' });
+            
+            // ১. শুধু একটি প্রসেসিং মেসেজ দেওয়া হলো (কোনো বাটন ছাড়া)
+            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Processing OTP for <code>${targetNum}</code>...</b>`, { parse_mode: 'HTML' });
             
             let otpFound = null;
-            for(let i=0; i<3; i++) {
-                await new Promise(r => setTimeout(r, 4500));
+            let cleanNum = targetNum.replace('+', '').trim();
+
+            // ২. ওটিপি খোঁজার লুপ (প্রতি ৫ সেকেন্ড পর পর ৪ বার চেক করবে, যাতে কোনো ওটিপি মিস না হয়)
+            for(let i=0; i<4; i++) {
+                await new Promise(r => setTimeout(r, 5000));
                 try {
                     const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
-                    if(res.data.data && res.data.data.otps) {
-                        const myOtp = res.data.data.otps.find(o => o.number.includes(targetNum.replace('+','')));
+                    if(res.data && res.data.data && res.data.data.otps) {
+                        const myOtp = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
                         if(myOtp) { otpFound = myOtp; break; }
                     }
                 } catch(e) {}
             }
 
+            // ৩. কাজ শেষ হওয়ার সাথে সাথেই প্রসেসিং মেসেজটি ডিলিট করে দেওয়া হলো
+            await bot.deleteMessage(chatId, statusMsg.message_id).catch(()=>{});
+
             if (otpFound) {
                 let { data: userStats } = await supabase.from('bot_users').select('total_otps').eq('telegram_id', chatId).single();
                 await supabase.from('bot_users').update({ total_otps: (userStats.total_otps || 0) + 1 }).eq('telegram_id', chatId);
+                
+                // ৪. নাম্বারের আসল মেসেজটি আপডেট করে সেখানে কোড বসিয়ে দেওয়া হলো
                 const smsg = `✅ <b>OTP RECEIVED!</b>\n━━━━━━━━━━━━━━━━\n📞 Number: <code>${targetNum}</code>\n💬 OTP: <code>${otpFound.message}</code>`;
-                return bot.editMessageText(smsg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: `📋 Copy Code: ${otpFound.message}`, callback_data: 'dummy' }]]} });
+                return bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: `📋 Copy Code: ${otpFound.message}`, callback_data: 'dummy' }]]} });
             } else {
-                const fmsg = `⏳ <b>OTP Not Received Yet.</b>\n📞 <code>${targetNum}</code>`;
-                return bot.editMessageText(fmsg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Check Again', callback_data: `chk_otp_${targetNum}` }]]} });
+                // ওটিপি না পেলে আসল মেসেজেই আবার চেক করার বাটন দেওয়া হলো
+                const fmsg = `⏳ <b>OTP Not Received Yet.</b>\n📞 <code>${targetNum}</code>\n<i>Try checking again...</i>`;
+                return bot.editMessageText(fmsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Check Again', callback_data: `chk_otp_${targetNum}` }]]} });
             }
         }
 
