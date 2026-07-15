@@ -70,13 +70,9 @@ async function validateInviteCode(code) {
 }
 
 async function useInviteCode(code) {
-    const { error } = await supabase.rpc('increment_invite_use', { invite_code: code });
-    if (error) {
-        // Fallback if RPC doesn't exist
-        const { data } = await supabase.from('bot_invites').select('current_uses').eq('code', code).single();
-        if (data) {
-            await supabase.from('bot_invites').update({ current_uses: data.current_uses + 1 }).eq('code', code);
-        }
+    const { data } = await supabase.from('bot_invites').select('current_uses').eq('code', code).single();
+    if (data) {
+        await supabase.from('bot_invites').update({ current_uses: data.current_uses + 1 }).eq('code', code);
     }
 }
 
@@ -173,6 +169,38 @@ function getCountryInlineKeyboard(countries) {
     return { reply_markup: { inline_keyboard: keyboard } };
 }
 
+// --- সেফ এডিট মেসেজ ফাংশন (এরর হ্যান্ডলিং সহ) ---
+
+async function safeEditMessageText(chatId, messageId, text, options = {}) {
+    try {
+        await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: options.parse_mode || 'Markdown',
+            reply_markup: options.reply_markup || undefined
+        });
+        return true;
+    } catch (error) {
+        if (error.code === 400 && error.description && error.description.includes('message is not modified')) {
+            // মেসেজ একই থাকলে এরর ইগনোর করে সফল হিসেবে ধরা হবে
+            console.log('Message not modified - ignoring');
+            return true;
+        }
+        console.error('মেসেজ এডিট করতে সমস্যা:', error);
+        return false;
+    }
+}
+
+async function safeDeleteMessage(chatId, messageId) {
+    try {
+        await bot.deleteMessage(chatId, messageId);
+        return true;
+    } catch (error) {
+        console.error('মেসেজ ডিলিট করতে সমস্যা:', error);
+        return false;
+    }
+}
+
 // --- মেনু হ্যান্ডলার ---
 
 async function handleCallback(callbackQuery) {
@@ -192,7 +220,7 @@ async function handleCallback(callbackQuery) {
     // স্টেট ক্লিয়ার করার জন্য ক্যান্সেল চেক
     if (data === 'cancel_state') {
         await updateUser(userId, { current_state: null });
-        await bot.editMessageText('❌ অপারেশন বাতিল করা হয়েছে।', { chat_id: chatId, message_id: messageId });
+        await bot.sendMessage(chatId, '❌ অপারেশন বাতিল করা হয়েছে।');
         await sendMainMenu(chatId, user);
         return;
     }
@@ -300,13 +328,19 @@ async function handleCallback(callbackQuery) {
         default:
             // কান্ট্রি সিলেকশন বা OTP চেক হ্যান্ডলার
             if (data.startsWith('country_')) {
-                const countryId = data.split('_')[1];
+                const countryId = data.split('_').slice(1).join('_');
                 await processGetNumber(chatId, userId, messageId, countryId);
             } else if (data.startsWith('getotp_')) {
                 const parts = data.split('_');
-                const phone = parts[1];
-                const countryId = parts[2];
+                const phone = parts.slice(1, -1).join('_');
+                const countryId = parts[parts.length - 1];
                 await processGetOTP(chatId, userId, messageId, phone, countryId);
+            } else if (data.startsWith('chk_otp_')) {
+                const phone = data.replace('chk_otp_', '');
+                await processGetOTP(chatId, userId, messageId, phone, 'manual');
+            } else if (data.startsWith('range_')) {
+                const rangeId = data.replace('range_', '');
+                await processGetNumber(chatId, userId, messageId, rangeId, 'range');
             }
             break;
     }
@@ -324,10 +358,11 @@ async function handleLiveTraffic(chatId) {
     }
 
     const allowedServices = ['Facebook', 'WhatsApp', 'Telegram'];
-    const filteredRanges = liveData.filter(item => allowedServices.some(s => item.service && item.service.includes(s)));
+    const filteredRanges = Array.isArray(liveData) ? 
+        liveData.filter(item => allowedServices.some(s => item.service && item.service.includes(s))) : [];
     
     const consoleHits = {};
-    if (consoleData.data) {
+    if (consoleData.data && Array.isArray(consoleData.data)) {
         consoleData.data.forEach(entry => {
             const key = entry.range || entry.number;
             if (key) consoleHits[key] = (consoleHits[key] || 0) + (entry.hits || 1);
@@ -339,10 +374,15 @@ async function handleLiveTraffic(chatId) {
         hitCount: consoleHits[r.range] || 0
     })).sort((a, b) => b.hitCount - a.hitCount).slice(0, 10);
 
-    let text = '📊 *লাইভ ট্রাফিক - সেরা রেঞ্জ*\n\n';
-    const maxHits = sortedRanges.length > 0 ? sortedRanges[0].hitCount : 1;
+    if (sortedRanges.length === 0) {
+        await bot.sendMessage(chatId, '❌ কোন সার্ভিস রেঞ্জ পাওয়া যায়নি।');
+        return;
+    }
 
-    const keyboard = sortedRanges.map(range => {
+    let text = '📊 *লাইভ ট্রাফিক - সেরা রেঞ্জ*\n\n';
+    const maxHits = sortedRanges[0].hitCount || 1;
+
+    const keyboard = sortedRanges.map((range, index) => {
         let indicator = '🔴 Low';
         if (range.hitCount === maxHits) indicator = '🟢 High';
         else if (range.hitCount > maxHits / 2) indicator = '🟡 Medium';
@@ -360,7 +400,7 @@ async function handleLiveTraffic(chatId) {
 
 async function fetchAndShowTopCountries(chatId, service) {
     const liveData = await fetchFromAPI('/liveaccess');
-    if (!liveData) {
+    if (!liveData || !Array.isArray(liveData)) {
         await bot.sendMessage(chatId, '❌ ডেটা ফেচ করতে সমস্যা হয়েছে।');
         return;
     }
@@ -400,16 +440,23 @@ function getFlagEmoji(countryCode) {
 
 // --- নম্বর প্রাপ্তি প্রক্রিয়া ---
 
-async function processGetNumber(chatId, userId, messageId, countryId) {
-    const apiResponse = await fetchFromAPI('/getnum', { country: countryId });
+async function processGetNumber(chatId, userId, messageId, countryId, type = 'country') {
+    let apiParams = {};
+    if (type === 'country') {
+        apiParams.country = countryId;
+    } else {
+        apiParams.range = countryId;
+    }
+    
+    const apiResponse = await fetchFromAPI('/getnum', apiParams);
     
     if (!apiResponse || !apiResponse.number) {
-        await bot.sendMessage(chatId, '❌ এই দেশের জন্য কোন নম্বর পাওয়া যায়নি।');
+        await bot.sendMessage(chatId, '❌ কোন নম্বর পাওয়া যায়নি। আবার চেষ্টা করুন।');
         return;
     }
 
     const phoneNumber = apiResponse.number;
-    const flag = getFlagEmoji(countryId);
+    const flag = type === 'country' ? getFlagEmoji(countryId) : '📱';
 
     await updateUser(userId, { total_numbers: (await getUser(userId)).total_numbers + 1 });
 
@@ -436,17 +483,14 @@ async function processGetOTP(chatId, userId, originalMessageId, phoneNumber, cou
         if (otpResponse && otpResponse.otp) {
             otpFound = true;
             // প্রসেসিং মেসেজ ডিলিট
-            await bot.deleteMessage(chatId, processingMsg.message_id);
+            await safeDeleteMessage(chatId, processingMsg.message_id);
             
             // অরিজিনাল মেসেজ আপডেট
-            const flag = getFlagEmoji(countryId);
+            const flag = countryId !== 'manual' ? getFlagEmoji(countryId) : '📱';
             const newText = `✅ *নম্বর ও OTP*\n\n${flag} \`${phoneNumber}\`\n🔑 OTP: \`${otpResponse.otp}\``;
             
-            await bot.editMessageText(newText, {
-                chat_id: chatId,
-                message_id: originalMessageId,
-                parse_mode: 'Markdown'
-            });
+            // একই টেক্সট দিয়ে আবার এডিট এড়াতে আগের মেসেজ আইডি ও কন্টেন্ট চেক করুন
+            await safeEditMessageText(chatId, originalMessageId, newText, { parse_mode: 'Markdown' });
 
             // OTP কাউন্টার আপডেট
             const user = await getUser(userId);
@@ -456,12 +500,13 @@ async function processGetOTP(chatId, userId, originalMessageId, phoneNumber, cou
     }
 
     if (!otpFound) {
-        await bot.editMessageText('⚠️ *এখনও OTP পাওয়া যায়নি*', {
-            chat_id: chatId,
-            message_id: processingMsg.message_id,
+        const notFoundText = `⏳ *OTP Not Received Yet.*\n📞 \`${phoneNumber}\`\n_Try checking again..._`;
+        
+        // প্রসেসিং মেসেজ আপডেট
+        await safeEditMessageText(chatId, processingMsg.message_id, notFoundText, {
             parse_mode: 'Markdown',
             reply_markup: {
-                inline_keyboard: [[{ text: '🔄 Check Again', callback_data: `getotp_${phoneNumber}_${countryId}` }]]
+                inline_keyboard: [[{ text: '🔄 Check Again', callback_data: `chk_otp_${phoneNumber}` }]]
             }
         });
     }
