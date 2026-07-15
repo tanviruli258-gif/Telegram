@@ -1,20 +1,16 @@
 {
-  "name": "telegram-admin-bot",
+  "name": "telegram-sms-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "Production-ready Telegram bot with Supabase-backed admin panel, approval system, invite system, spam protection, and broadcast tools. Deployable on Vercel serverless functions.",
-  "type": "module",
-  "engines": {
-    "node": ">=18.x"
-  },
+  "description": "Advanced Telegram Bot for SMS Verification & 2FA",
+  "main": "api/bot.js",
   "scripts": {
-    "start": "node api/bot.js",
-    "dev": "vercel dev"
+    "start": "node api/bot.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
-    "axios": "^1.7.7",
-    "express": "^4.21.0",
-    "node-telegram-bot-api": "^0.66.0"
+    "@supabase/supabase-js": "^2.39.3",
+    "axios": "^1.6.7",
+    "node-telegram-bot-api": "^0.66.0",
+    "nodemailer": "^6.9.9",
+    "otplib": "^12.0.1"
   }
 }
