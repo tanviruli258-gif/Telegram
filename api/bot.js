@@ -378,11 +378,13 @@ async function processCallback(query) {
             }
         }
 
-        // GET NUMBER MANUAL
-        if (data === 'getnum_manual') {
-            await setUserState(chatId, 'WAITING_MANUAL_RANGE');
-            await bot.deleteMessage(chatId, msgId);
-            return bot.sendMessage(chatId, "⚙️ <b>Send the Range Prefix</b>\nExample: <code>26134</code>", { parse_mode: 'HTML', reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } });
+        if (state === 'WAITING_MANUAL_RANGE') {
+            await setUserState(chatId, null);
+            // স্মার্ট ফিল্টার: ইউজার XXX দিলেও সেটা অটোমেটিক রিমুভ হয়ে যাবে
+            const range = text.trim().toUpperCase().replace(/X/g, ''); 
+            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML' });
+            processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
+            return;
         }
 
 // REQUEST NUMBER API CALL
