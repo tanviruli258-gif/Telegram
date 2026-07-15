@@ -1,1199 +1,559 @@
-// ============================================================================
-// TELEGRAM ADMIN BOT — Production Entry Point
-// Runtime: Node.js (ES Modules) — Deployable as a Vercel Serverless Function
-// ============================================================================
+-- Create bot_users table
+CREATE TABLE IF NOT EXISTS bot_users (
+    telegram_id bigint PRIMARY KEY,
+    is_approved boolean DEFAULT false,
+    is_admin boolean DEFAULT false,
+    is_banned boolean DEFAULT false,
+    sms_count integer DEFAULT 0,
+    last_reset text,
+    current_state text,
+    total_numbers integer DEFAULT 0,
+    total_otps integer DEFAULT 0
+);
 
-import express from 'express';
-import TelegramBot from 'node-telegram-bot-api';
-import { createClient } from '@supabase/supabase-js';
-import axios from 'axios';
-import crypto from 'crypto';
+-- Create bot_settings table
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id integer PRIMARY KEY DEFAULT 1,
+    welcome_msg text DEFAULT 'Welcome to the Bot!',
+    bot_status boolean DEFAULT true,
+    default_msg_limit integer DEFAULT 2,
+    target_email text,
+    smtp_user text,
+    smtp_pass text,
+    mauth_api text
+);
 
-// ----------------------------------------------------------------------------
-// CONFIGURATION — the only values that need to be replaced for deployment.
-// ----------------------------------------------------------------------------
+-- Insert default settings row if it doesn't exist
+INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT DO NOTHING;
+
+-- Create bot_invites table
+CREATE TABLE IF NOT EXISTS bot_invites (
+    code text PRIMARY KEY,
+    max_uses integer DEFAULT 1,
+    current_uses integer DEFAULT 0,
+    is_active boolean DEFAULT true
+);
+```eof
+
+```javascript:api/bot.js
+process.env.NTBA_FIX_319 = 1;
+const TelegramBot = require('node-telegram-bot-api');
+const { createClient } = require('@supabase/supabase-js');
+const nodemailer = require('nodemailer');
+const axios = require('axios');
+const { authenticator } = require('otplib');
+
+// ================= CONFIGURATION =================
+// Fetching strictly from Environment Variables
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = (process.env.ADMIN_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map((id) => Number(id));
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
-const TARGET_EMAIL = process.env.TARGET_EMAIL;
-
-if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY || !TARGET_EMAIL || ADMIN_IDS.length === 0) {
-    console.error('FATAL: Missing required configuration. Check BOT_TOKEN, ADMIN_IDS, SUPABASE_URL, SUPABASE_SECRET_KEY, TARGET_EMAIL.');
-}
-
-// ----------------------------------------------------------------------------
-// CLIENTS
-// ----------------------------------------------------------------------------
-const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
-    auth: { persistSession: false },
-});
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : []; 
+const API_BASE_URL = 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
+// =================================================
 
 const bot = new TelegramBot(BOT_TOKEN);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
-let cachedBotUsername = null;
-async function getBotUsername() {
-    if (cachedBotUsername) return cachedBotUsername;
-    const me = await bot.getMe();
-    cachedBotUsername = me.username;
-    return cachedBotUsername;
-}
+// --- Keyboards ---
+const adminMainMenu = { reply_markup: { keyboard: [['📱 Fix Number', '🔢 Get Number'], ['🔐 2FA Generator', '📊 My Stats'], ['🎧 Support', '⚙️ Admin Panel']], resize_keyboard: true } };
+const userMainMenu = { reply_markup: { keyboard: [['📱 Fix Number', '🔢 Get Number'], ['🔐 2FA Generator', '📊 My Stats'], ['🎧 Support']], resize_keyboard: true } };
+const cancelMenu = { reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } };
 
-// ----------------------------------------------------------------------------
-// BUTTON LABELS
-// ----------------------------------------------------------------------------
-const BTN_PRODUCT_ORDER = '🛒 Product Order';
-const BTN_SUPPORT = '🎧 Support';
-const BTN_ADMIN_PANEL = '⚙️ Admin Panel';
-const BTN_BACK = '🔙 Back';
+const adminMenu = { reply_markup: { keyboard: [['⚙️ Bot Config', '🌐 API & Email'], ['👥 User Manage', '📈 Global Stats'], ['🔙 Back to Main']], resize_keyboard: true } };
+const botConfigMenu = { reply_markup: { keyboard: [['📝 WLC MESSAGE EDIT', '⚙️ BOT ON/OFF'], ['📊 LIMIT USER', '🔙 Admin Home']], resize_keyboard: true } };
+const apiEmailMenu = { reply_markup: { keyboard: [['🎯 Set Target Email', '📧 SMTP Setup'], ['🔌 API Setup', '🔙 Admin Home']], resize_keyboard: true } };
+const userManageMenu = { reply_markup: { keyboard: [['📢 Broadcast', '🔗 Generate Invite'], ['✅ Approve User', '🚫 Ban/Remove User'], ['🗑 Clear Database', '🔙 Admin Home']], resize_keyboard: true } };
 
-const BTN_WELCOME_EDIT = '📝 WLC MESSAGE EDIT';
-const BTN_BOT_TOGGLE = '⚙️ BOT ON/OFF';
-const BTN_SET_EMAIL_API = '🔑 SET EMAIL API';
-const BTN_LIMIT_USER = '📊 LIMIT USER';
-const BTN_BROADCAST = '📢 Broadcast';
-const BTN_USERS = '👥 Users';
-const BTN_STATISTICS = '📈 Statistics';
-const BTN_BAN_USER = '🚫 Ban User';
-const BTN_APPROVE_USER = '✅ Approve User';
-const BTN_REMOVE_USER = '❌ Remove User';
-const BTN_CLEAR_DB = '🗑 Clear Database';
-const BTN_SETTINGS = '⚙ Settings';
-
-const BTN_TOGGLE_APPROVAL = '🔄 Toggle Approval Mode';
-const BTN_SET_COOLDOWN = '⏱ Set Cooldown Minutes';
-const BTN_SET_SUPPORT_EMAIL = '📧 Set Support Email';
-const BTN_GENERATE_INVITE = '🎟 Generate Invite Code';
-
-const BTN_SEND_BROADCAST = '📩 Send Message';
-const BTN_CANCEL = '❌ Cancel';
-
-// ----------------------------------------------------------------------------
-// KEYBOARDS (Reply Keyboards only — no inline keyboards anywhere)
-// ----------------------------------------------------------------------------
-function mainMenuKeyboard(isAdminUser) {
-    const rows = [[BTN_PRODUCT_ORDER, BTN_SUPPORT]];
-    if (isAdminUser) rows.push([BTN_ADMIN_PANEL]);
-    return { keyboard: rows, resize_keyboard: true, is_persistent: true };
-}
-
-function adminPanelKeyboard() {
-    return {
-        keyboard: [
-            [BTN_WELCOME_EDIT, BTN_BOT_TOGGLE],
-            [BTN_SET_EMAIL_API, BTN_LIMIT_USER],
-            [BTN_BROADCAST, BTN_USERS],
-            [BTN_STATISTICS, BTN_SETTINGS],
-            [BTN_BAN_USER, BTN_APPROVE_USER],
-            [BTN_REMOVE_USER, BTN_CLEAR_DB],
-            [BTN_BACK],
-        ],
-        resize_keyboard: true,
-        is_persistent: true,
-    };
-}
-
-function settingsMenuKeyboard() {
-    return {
-        keyboard: [
-            [BTN_TOGGLE_APPROVAL],
-            [BTN_SET_COOLDOWN, BTN_SET_SUPPORT_EMAIL],
-            [BTN_GENERATE_INVITE],
-            [BTN_BACK],
-        ],
-        resize_keyboard: true,
-        is_persistent: true,
-    };
-}
-
-function broadcastConfirmKeyboard() {
-    return {
-        keyboard: [[BTN_SEND_BROADCAST], [BTN_CANCEL]],
-        resize_keyboard: true,
-        is_persistent: true,
-    };
-}
-
-function backOnlyKeyboard() {
-    return { keyboard: [[BTN_BACK]], resize_keyboard: true, is_persistent: true };
-}
-
-// ----------------------------------------------------------------------------
-// DATA HELPERS
-// ----------------------------------------------------------------------------
-function isAdmin(telegramId) {
-    return ADMIN_IDS.includes(Number(telegramId));
-}
-
+// --- Helper Functions ---
 async function getSettings() {
-    const { data, error } = await supabase.from('settings').select('*').eq('id', 1).single();
-    if (error) {
-        console.error('getSettings error:', error.message);
-        throw error;
+    const { data } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
+    return data || {};
+}
+async function setUserState(chatId, state) {
+    await supabase.from('bot_users').update({ current_state: state }).eq('telegram_id', chatId);
+}
+
+// Advanced Country Mapper
+const countryCodes = {
+    '1': {n: 'USA/CA', f: '🇺🇸'}, '7': {n: 'Russia/KZ', f: '🇷🇺'}, '20': {n: 'Egypt', f: '🇪🇬'}, 
+    '27': {n: 'South Africa', f: '🇿🇦'}, '33': {n: 'France', f: '🇫🇷'}, '34': {n: 'Spain', f: '🇪🇸'},
+    '39': {n: 'Italy', f: '🇮🇹'}, '44': {n: 'UK', f: '🇬🇧'}, '49': {n: 'Germany', f: '🇩🇪'}, 
+    '60': {n: 'Malaysia', f: '🇲🇾'}, '62': {n: 'Indonesia', f: '🇮🇩'}, '63': {n: 'Philippines', f: '🇵🇭'},
+    '66': {n: 'Thailand', f: '🇹🇭'}, '81': {n: 'Japan', f: '🇯🇵'}, '84': {n: 'Vietnam', f: '🇻🇳'}, 
+    '86': {n: 'China', f: '🇨🇳'}, '90': {n: 'Turkey', f: '🇹🇷'}, '91': {n: 'India', f: '🇮🇳'},
+    '92': {n: 'Pakistan', f: '🇵🇰'}, '93': {n: 'Afghanistan', f: '🇦🇫'}, '94': {n: 'Sri Lanka', f: '🇱🇰'}, 
+    '98': {n: 'Iran', f: '🇮🇷'}, '212': {n: 'Morocco', f: '🇲🇦'}, '213': {n: 'Algeria', f: '🇩🇿'},
+    '224': {n: 'Guinea', f: '🇬🇳'}, '225': {n: 'Ivory Coast', f: '🇨🇮'}, '229': {n: 'Benin', f: '🇧🇯'}, 
+    '234': {n: 'Nigeria', f: '🇳🇬'}, '236': {n: 'CAR', f: '🇨🇫'}, '251': {n: 'Ethiopia', f: '🇪🇹'},
+    '254': {n: 'Kenya', f: '🇰🇪'}, '261': {n: 'Madagascar', f: '🇲🇬'}, '351': {n: 'Portugal', f: '🇵🇹'}, 
+    '375': {n: 'Belarus', f: '🇧🇾'}, '380': {n: 'Ukraine', f: '🇺🇦'}, '880': {n: 'Bangladesh', f: '🇧🇩'},
+    '966': {n: 'Saudi Arabia', f: '🇸🇦'}, '971': {n: 'UAE', f: '🇦🇪'}, '972': {n: 'Israel', f: '🇮🇱'},
+    '977': {n: 'Nepal', f: '🇳🇵'}, '998': {n: 'Uzbekistan', f: '🇺🇿'}
+};
+function getCountryByRange(range) {
+    let clean = range.replace(/X/g, '');
+    for (let i = 4; i > 0; i--) {
+        let prefix = clean.substring(0, i);
+        if (countryCodes[prefix]) return { name: countryCodes[prefix].n, flag: countryCodes[prefix].f, code: clean };
     }
-    return data;
+    return { name: `Global (${clean})`, flag: '🌐', code: clean };
 }
 
-async function updateSettings(patch) {
-    const { data, error } = await supabase.from('settings').update(patch).eq('id', 1).select().single();
-    if (error) {
-        console.error('updateSettings error:', error.message);
-        throw error;
-    }
-    return data;
-}
-
-async function getUser(telegramId) {
-    const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('telegram_id', telegramId)
-        .maybeSingle();
-    if (error) {
-        console.error('getUser error:', error.message);
-        throw error;
-    }
-    return data;
-}
-
-async function getUserState(telegramId) {
-    const { data, error } = await supabase
-        .from('user_states')
-        .select('*')
-        .eq('telegram_id', telegramId)
-        .maybeSingle();
-    if (error) {
-        console.error('getUserState error:', error.message);
-        throw error;
-    }
-    return data;
-}
-
-async function setUserState(telegramId, state, data = {}) {
-    const { error } = await supabase
-        .from('user_states')
-        .upsert({ telegram_id: telegramId, state, data, updated_at: new Date().toISOString() });
-    if (error) console.error('setUserState error:', error.message);
-}
-
-async function clearUserState(telegramId) {
-    const { error } = await supabase.from('user_states').delete().eq('telegram_id', telegramId);
-    if (error) console.error('clearUserState error:', error.message);
-}
-
-async function logAction(actionType, actorId, targetId, details = {}) {
-    const { error } = await supabase.from('logs').insert({
-        action_type: actionType,
-        actor_id: actorId ?? null,
-        target_id: targetId ?? null,
-        details,
-    });
-    if (error) console.error('logAction error:', error.message);
-}
-
-function isValidTelegramId(str) {
-    return /^\d{5,15}$/.test(str);
-}
-
-function isValidEmail(str) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str);
-}
-
-function parsePositiveInt(str) {
-    const n = Number(str);
-    return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function generateInviteCode() {
-    return crypto.randomBytes(6).toString('hex').toUpperCase();
-}
-
-async function safeSendMessage(chatId, text, options = {}) {
-    try {
-        return await bot.sendMessage(chatId, text, options);
-    } catch (err) {
-        console.error(`safeSendMessage failed for ${chatId}:`, err.message);
-        return null;
-    }
-}
-
-// ----------------------------------------------------------------------------
-// EMAIL DELIVERY
-// ----------------------------------------------------------------------------
-async function sendTransactionalEmail(subject, html) {
-    const settings = await getSettings();
-    if (!settings.email_api_key) {
-        throw new Error('EMAIL_API_NOT_CONFIGURED');
-    }
-
-    const response = await axios.post(
-        settings.email_api_url,
-        {
-            from: settings.email_from_address,
-            to: [TARGET_EMAIL],
-            subject,
-            html,
-        },
-        {
-            headers: {
-                Authorization: `Bearer ${settings.email_api_key}`,
-                'Content-Type': 'application/json',
-            },
-            timeout: 15000,
-        }
-    );
-
-    return response.data;
-}
-
-// ----------------------------------------------------------------------------
-// MENU NAVIGATION
-// ----------------------------------------------------------------------------
-async function showMainMenu(chatId, telegramId) {
-    await setUserState(telegramId, 'menu_main', {});
-    const settings = await getSettings();
-    await safeSendMessage(chatId, settings.welcome_message, {
-        parse_mode: 'Markdown',
-        reply_markup: mainMenuKeyboard(isAdmin(telegramId)),
-    });
-}
-
-async function showAdminMenu(chatId, telegramId) {
-    await setUserState(telegramId, 'menu_admin', {});
-    await safeSendMessage(chatId, '⚙️ *Admin Panel*\nChoose an action below.', {
-        parse_mode: 'Markdown',
-        reply_markup: adminPanelKeyboard(),
-    });
-}
-
-async function showSettingsMenu(chatId, telegramId) {
-    await setUserState(telegramId, 'menu_settings', {});
-    const settings = await getSettings();
-    const text =
-        `⚙ *Settings*\n\n` +
-        `Approval Mode: ${settings.approval_required ? 'ON ✅' : 'OFF ❌'}\n` +
-        `Cooldown Minutes: ${settings.cooldown_minutes}\n` +
-        `Support Email: ${settings.support_email}`;
-    await safeSendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: settingsMenuKeyboard() });
-}
-
-async function promptInput(chatId, telegramId, inputState, returnTo, promptText, extraData = {}) {
-    await setUserState(telegramId, inputState, { returnTo, ...extraData });
-    await safeSendMessage(chatId, promptText, { parse_mode: 'Markdown', reply_markup: backOnlyKeyboard() });
-}
-
-async function returnToMenu(chatId, telegramId, returnTo) {
-    if (returnTo === 'admin') return showAdminMenu(chatId, telegramId);
-    if (returnTo === 'settings') return showSettingsMenu(chatId, telegramId);
-    return showMainMenu(chatId, telegramId);
-}
-
-// ----------------------------------------------------------------------------
-// /start HANDLER
-// ----------------------------------------------------------------------------
-async function handleStart(msg) {
+// --- Message Processor ---
+async function processMessage(msg) {
     const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-    const parts = (msg.text || '').trim().split(/\s+/);
-    const invitePayload = parts.length > 1 ? parts[1] : null;
-    const admin = isAdmin(telegramId);
-
-    const settings = await getSettings();
-    const existingUser = await getUser(telegramId);
-
-    if (existingUser) {
-        await clearUserState(telegramId);
-        if (existingUser.is_banned) {
-            await safeSendMessage(chatId, '🚫 You have been banned from using this bot.');
-            return;
-        }
-        if (!settings.bot_enabled && !admin) {
-            await safeSendMessage(chatId, '🛠 The bot is currently under maintenance. Please try again later.');
-            return;
-        }
-        if (settings.approval_required && !existingUser.is_approved && !admin) {
-            await safeSendMessage(chatId, '⏳ Your account is pending admin approval. Please wait.');
-            return;
-        }
-        await showMainMenu(chatId, telegramId);
-        return;
-    }
-
-    // New user registration flow
-    if (!admin) {
-        if (!settings.bot_enabled) {
-            await safeSendMessage(chatId, '🛠 The bot is currently under maintenance. Please try again later.');
-            return;
-        }
-
-        if (!invitePayload) {
-            await safeSendMessage(chatId, '🔒 You need a valid invite link to join this bot. Please contact the admin.');
-            return;
-        }
-
-        const { data: claimedInvite, error: claimError } = await supabase.rpc('claim_invite', {
-            p_code: invitePayload,
-        });
-        if (claimError) {
-            console.error('claim_invite error:', claimError.message);
-            await safeSendMessage(chatId, '⚠️ Something went wrong validating your invite. Please try again later.');
-            return;
-        }
-        if (!claimedInvite) {
-            await safeSendMessage(chatId, '❌ This invite link is invalid or has already reached its usage limit.');
-            return;
-        }
-
-        const { count: userCount } = await supabase.from('users').select('*', { count: 'exact', head: true });
-        if ((userCount ?? 0) >= settings.max_users) {
-            await safeSendMessage(chatId, '🚫 User limit reached. The bot is not accepting new users right now.');
-            return;
-        }
-
-        await supabase.from('invite_uses').insert({ invite_id: claimedInvite.id, telegram_id: telegramId });
-    }
-
-    const isApproved = admin || !settings.approval_required;
-    const { error: insertError } = await supabase.from('users').insert({
-        telegram_id: telegramId,
-        username: msg.from.username || null,
-        first_name: msg.from.first_name || null,
-        last_name: msg.from.last_name || null,
-        invite_code_used: invitePayload,
-        is_approved: isApproved,
-    });
-
-    if (insertError) {
-        // Duplicate registration race-condition guard (unique constraint on telegram_id)
-        if (insertError.code === '23505') {
-            await showMainMenu(chatId, telegramId);
-            return;
-        }
-        console.error('user insert error:', insertError.message);
-        await safeSendMessage(chatId, '⚠️ Registration failed. Please try again.');
-        return;
-    }
-
-    await logAction('user_registered', telegramId, telegramId, { invite: invitePayload || null });
-
-    if (!isApproved) {
-        await safeSendMessage(chatId, '⏳ Thanks for joining! Please wait for admin approval before you can use the bot.');
-        const adminText =
-            `🆕 *New user pending approval*\n\n` +
-            `Telegram ID: \`${telegramId}\`\n` +
-            `Username: ${msg.from.username ? '@' + msg.from.username : 'N/A'}\n` +
-            `Name: ${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() +
-            `\n\nUse ✅ Approve User in the Admin Panel with this ID to approve.`;
-        for (const adminId of ADMIN_IDS) {
-            await safeSendMessage(adminId, adminText, { parse_mode: 'Markdown' });
-        }
-        return;
-    }
-
-    await showMainMenu(chatId, telegramId);
-}
-
-// ----------------------------------------------------------------------------
-// PRODUCT ORDER FEATURE
-// ----------------------------------------------------------------------------
-async function beginProductOrder(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_product_order',
-        'main',
-        '🛒 Please type the *product name* you purchased and we will send a confirmation.'
-    );
-}
-
-async function completeProductOrder(msg, telegramId, productName) {
-    const chatId = msg.chat.id;
-    const subject = 'Product Purchase Confirmation';
-    const html =
-        `<p>Thank you for purchasing our product: <strong>${escapeHtml(productName)}</strong>.</p>` +
-        `<p>We appreciate your trust in us!</p>` +
-        `<p><small>Telegram user ID: ${telegramId}</small></p>`;
-
-    let sent = false;
-    try {
-        await sendTransactionalEmail(subject, html);
-        sent = true;
-    } catch (err) {
-        console.error('completeProductOrder email error:', err.message);
-    }
-
-    await supabase.from('product_orders').insert({
-        telegram_id: telegramId,
-        product_name: productName,
-        email_sent: sent,
-    });
-
-    await logAction('product_order_email', telegramId, telegramId, { product_name: productName, sent });
-
-    if (sent) {
-        await safeSendMessage(chatId, '✅ Thank you! A confirmation has been sent.');
-    } else {
-        await safeSendMessage(
-            chatId,
-            '⚠️ We could not send the confirmation email right now. Our team has been notified — please contact support.'
-        );
-    }
-
-    await returnToMenu(chatId, telegramId, 'main');
-}
-
-function escapeHtml(str) {
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-// ----------------------------------------------------------------------------
-// ADMIN ACTIONS
-// ----------------------------------------------------------------------------
-async function handleWelcomeEditPrompt(chatId, telegramId) {
-    const settings = await getSettings();
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_welcome',
-        'admin',
-        `📝 Current welcome message:\n\n${settings.welcome_message}\n\nSend the new welcome message (Markdown & emoji supported).`
-    );
-}
-
-async function handleBotTogglePress(chatId, telegramId) {
-    const settings = await getSettings();
-    const updated = await updateSettings({ bot_enabled: !settings.bot_enabled });
-    await logAction('bot_toggle', telegramId, null, { bot_enabled: updated.bot_enabled });
-    await safeSendMessage(chatId, `⚙️ Bot is now *${updated.bot_enabled ? 'ONLINE ✅' : 'OFFLINE 🛑'}*.`, {
-        parse_mode: 'Markdown',
-    });
-    await showAdminMenu(chatId, telegramId);
-}
-
-async function handleSetEmailApiPrompt(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_email_api',
-        'admin',
-        '🔑 Send your email API key.\n\nTo also change the API endpoint URL, send it as:\n`URL|API_KEY`'
-    );
-}
-
-async function handleLimitUserPrompt(chatId, telegramId) {
-    const settings = await getSettings();
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_limit_daily',
-        'admin',
-        `📊 Current daily message limit: *${settings.daily_message_limit}*\n\nSend the new daily message limit (number), or send \`skip\` to keep it unchanged.`
-    );
-}
-
-async function handleBroadcastPrompt(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_broadcast_message',
-        'admin',
-        '📢 Send the message you want to broadcast to all approved users (Markdown supported).'
-    );
-}
-
-async function handleUsersList(chatId, telegramId) {
-    const { data: users, error } = await supabase
-        .from('users')
-        .select('telegram_id, username, is_approved, is_banned, joined_at')
-        .order('joined_at', { ascending: false })
-        .limit(30);
-
-    if (error) {
-        console.error('handleUsersList error:', error.message);
-        await safeSendMessage(chatId, '⚠️ Failed to load users.');
-        await showAdminMenu(chatId, telegramId);
-        return;
-    }
-
-    const { count: totalCount } = await supabase.from('users').select('*', { count: 'exact', head: true });
-
-    if (!users || users.length === 0) {
-        await safeSendMessage(chatId, '👥 No users registered yet.');
-        await showAdminMenu(chatId, telegramId);
-        return;
-    }
-
-    let text = `👥 *Users* (showing latest ${users.length} of ${totalCount})\n\n`;
-    for (const u of users) {
-        const status = u.is_banned ? '🚫' : u.is_approved ? '✅' : '⏳';
-        const uname = u.username ? '@' + u.username : 'N/A';
-        text += `${status} \`${u.telegram_id}\` — ${uname}\n`;
-    }
-
-    await safeSendMessage(chatId, text, { parse_mode: 'Markdown' });
-    await showAdminMenu(chatId, telegramId);
-}
-
-async function handleStatistics(chatId, telegramId) {
-    const { data, error } = await supabase.from('v_bot_statistics').select('*').single();
-    if (error) {
-        console.error('handleStatistics error:', error.message);
-        await safeSendMessage(chatId, '⚠️ Failed to load statistics.');
-        await showAdminMenu(chatId, telegramId);
-        return;
-    }
-
-    const text =
-        `📈 *Bot Statistics*\n\n` +
-        `👥 Total Users: ${data.total_users}\n` +
-        `✅ Approved Users: ${data.approved_users}\n` +
-        `⏳ Pending Users: ${data.pending_users}\n` +
-        `🚫 Banned Users: ${data.banned_users}\n` +
-        `🆕 Today's Users: ${data.todays_users}\n` +
-        `💬 Total Messages: ${data.total_messages}\n` +
-        `🧊 Cooldown Users: ${data.cooldown_users}\n` +
-        `🎟 Active Invites: ${data.active_invites}\n` +
-        `📊 Total Invite Uses: ${data.total_invite_uses}\n` +
-        `📢 Total Broadcasts: ${data.total_broadcasts}\n` +
-        `🛒 Product Orders: ${data.total_product_orders}`;
-
-    await safeSendMessage(chatId, text, { parse_mode: 'Markdown' });
-    await showAdminMenu(chatId, telegramId);
-}
-
-async function handleBanUserPrompt(chatId, telegramId) {
-    await promptInput(chatId, telegramId, 'input_ban_id', 'admin', '🚫 Send the Telegram ID of the user to ban.');
-}
-
-async function handleApproveUserPrompt(chatId, telegramId) {
-    await promptInput(chatId, telegramId, 'input_approve_id', 'admin', '✅ Send the Telegram ID of the user to approve.');
-}
-
-async function handleRemoveUserPrompt(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_remove_id',
-        'admin',
-        '❌ Send the Telegram ID of the user to permanently remove.'
-    );
-}
-
-async function handleClearDatabasePrompt(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_clear_confirm',
-        'admin',
-        '🗑 *This will permanently delete ALL users, invites, logs, broadcasts and orders.*\n\nThis action cannot be undone.\n\nSend `CONFIRM DELETE` to proceed, or press Back to cancel.'
-    );
-}
-
-async function handleSettingsButton(chatId, telegramId) {
-    await showSettingsMenu(chatId, telegramId);
-}
-
-async function handleToggleApproval(chatId, telegramId) {
-    const settings = await getSettings();
-    const updated = await updateSettings({ approval_required: !settings.approval_required });
-    await logAction('approval_toggle', telegramId, null, { approval_required: updated.approval_required });
-    await safeSendMessage(chatId, `🔄 Approval mode is now *${updated.approval_required ? 'ON' : 'OFF'}*.`, {
-        parse_mode: 'Markdown',
-    });
-    await showSettingsMenu(chatId, telegramId);
-}
-
-async function handleSetCooldownPrompt(chatId, telegramId) {
-    const settings = await getSettings();
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_cooldown',
-        'settings',
-        `⏱ Current cooldown: *${settings.cooldown_minutes} minute(s)*\n\nSend the new cooldown duration in minutes.`
-    );
-}
-
-async function handleSetSupportEmailPrompt(chatId, telegramId) {
-    const settings = await getSettings();
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_support_email',
-        'settings',
-        `📧 Current support email: *${settings.support_email}*\n\nSend the new support email address.`
-    );
-}
-
-async function handleGenerateInvitePrompt(chatId, telegramId) {
-    await promptInput(
-        chatId,
-        telegramId,
-        'input_invite_maxuses',
-        'settings',
-        '🎟 Send the maximum number of users this invite code can register (e.g. `5`).'
-    );
-}
-
-// ----------------------------------------------------------------------------
-// BROADCAST EXECUTION
-// ----------------------------------------------------------------------------
-async function executeBroadcast(chatId, telegramId, message) {
-    const processingMsg = await safeSendMessage(chatId, '⏳ Processing...');
-
-    const { data: recipients, error } = await supabase
-        .from('users')
-        .select('telegram_id')
-        .eq('is_approved', true)
-        .eq('is_banned', false);
-
-    if (error) {
-        console.error('executeBroadcast fetch error:', error.message);
-        await safeSendMessage(chatId, '⚠️ Failed to load recipients.');
-        await showAdminMenu(chatId, telegramId);
-        return;
-    }
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const recipient of recipients) {
-        try {
-            await bot.sendMessage(recipient.telegram_id, message, { parse_mode: 'Markdown' });
-            successCount += 1;
-        } catch (err) {
-            failCount += 1;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 40));
-    }
-
-    if (processingMsg) {
-        try {
-            await bot.deleteMessage(chatId, processingMsg.message_id);
-        } catch (err) {
-            // Message may already be gone; ignore.
-        }
-    }
-
-    await supabase.from('broadcasts').insert({
-        sent_by: telegramId,
-        message,
-        success_count: successCount,
-        fail_count: failCount,
-    });
-
-    await logAction('broadcast_sent', telegramId, null, { success: successCount, fail: failCount });
-
-    await safeSendMessage(
-        chatId,
-        `✅ Broadcast completed successfully.\n\n📬 Success: ${successCount}\n❌ Failed: ${failCount}`
-    );
-    await showAdminMenu(chatId, telegramId);
-}
-
-// ----------------------------------------------------------------------------
-// STATE INPUT ROUTER — handles free-text replies to admin/user prompts
-// ----------------------------------------------------------------------------
-async function handleStateInput(msg, state) {
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-    const text = (msg.text || '').trim();
-    const returnTo = state.data?.returnTo || 'main';
-
-    switch (state.state) {
-        case 'menu_main':
-        case 'menu_admin':
-        case 'menu_settings':
-            // Pure navigation states are handled by the main dispatcher, not here.
-            await dispatchMenuButton(msg, text);
-            return;
-
-        case 'input_product_order': {
-            if (!text) {
-                await safeSendMessage(chatId, '⚠️ Please type a valid product name.');
-                return;
-            }
-            await completeProductOrder(msg, telegramId, text);
-            return;
-        }
-
-        case 'input_welcome': {
-            await updateSettings({ welcome_message: text });
-            await logAction('welcome_message_updated', telegramId, null, {});
-            await safeSendMessage(chatId, '✅ Welcome message updated.');
-            await returnToMenu(chatId, telegramId, returnTo);
-            return;
-        }
-
-        case 'input_email_api': {
-            let apiUrl;
-            let apiKey;
-            if (text.includes('|')) {
-                const [urlPart, keyPart] = text.split('|').map((s) => s.trim());
-                apiUrl = urlPart;
-                apiKey = keyPart;
-            } else {
-                apiKey = text;
-            }
-            const patch = { email_api_key: apiKey };
-            if (apiUrl) patch.email_api_url = apiUrl;
-            await updateSettings(patch);
-            await logAction('email_api_updated', telegramId, null, { masked_key: apiKey.slice(0, 4) + '****' });
-            await safeSendMessage(chatId, '✅ Email API configuration updated.');
-            await returnToMenu(chatId, telegramId, returnTo);
-            return;
-        }
-
-        case 'input_limit_daily': {
-            if (text.toLowerCase() !== 'skip') {
-                const value = parsePositiveInt(text);
-                if (!value) {
-                    await safeSendMessage(chatId, '⚠️ Please send a valid positive number, or `skip`.');
-                    return;
-                }
-                await updateSettings({ daily_message_limit: value });
-            }
-            const settings = await getSettings();
-            await promptInput(
-                chatId,
-                telegramId,
-                'input_limit_maxusers',
-                'admin',
-                `📊 Current max users: *${settings.max_users}*\n\nSend the new max users limit (number), or send \`skip\` to keep it unchanged.`
-            );
-            return;
-        }
-
-        case 'input_limit_maxusers': {
-            if (text.toLowerCase() !== 'skip') {
-                const value = parsePositiveInt(text);
-                if (!value) {
-                    await safeSendMessage(chatId, '⚠️ Please send a valid positive number, or `skip`.');
-                    return;
-                }
-                await updateSettings({ max_users: value });
-            }
-            await logAction('user_limits_updated', telegramId, null, {});
-            const settings = await getSettings();
-            await safeSendMessage(
-                chatId,
-                `✅ Limits updated.\n\nDaily message limit: ${settings.daily_message_limit}\nMax users: ${settings.max_users}`
-            );
-            await returnToMenu(chatId, telegramId, 'admin');
-            return;
-        }
-
-        case 'input_broadcast_message': {
-            if (!text) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid message to broadcast.');
-                return;
-            }
-            await setUserState(telegramId, 'input_broadcast_confirm', { returnTo: 'admin', message: text });
-            await safeSendMessage(chatId, `📢 *Preview:*\n\n${text}\n\nSend to confirm, or cancel.`, {
-                parse_mode: 'Markdown',
-                reply_markup: broadcastConfirmKeyboard(),
-            });
-            return;
-        }
-
-        case 'input_broadcast_confirm': {
-            if (text === BTN_SEND_BROADCAST) {
-                const message = state.data.message;
-                await clearUserState(telegramId);
-                await executeBroadcast(chatId, telegramId, message);
-                return;
-            }
-            if (text === BTN_CANCEL) {
-                await safeSendMessage(chatId, '❌ Broadcast cancelled.');
-                await returnToMenu(chatId, telegramId, 'admin');
-                return;
-            }
-            await safeSendMessage(chatId, `Please press "${BTN_SEND_BROADCAST}" or "${BTN_CANCEL}".`, {
-                reply_markup: broadcastConfirmKeyboard(),
-            });
-            return;
-        }
-
-        case 'input_ban_id': {
-            if (!isValidTelegramId(text)) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid numeric Telegram ID.');
-                return;
-            }
-            const targetId = Number(text);
-            const targetUser = await getUser(targetId);
-            if (!targetUser) {
-                await safeSendMessage(chatId, '❌ No user found with that Telegram ID.');
-                return;
-            }
-            await supabase.from('users').update({ is_banned: true }).eq('telegram_id', targetId);
-            await logAction('user_banned', telegramId, targetId, {});
-            await safeSendMessage(chatId, `🚫 User \`${targetId}\` has been banned.`, { parse_mode: 'Markdown' });
-            await safeSendMessage(targetId, '🚫 You have been banned from using this bot.');
-            await returnToMenu(chatId, telegramId, 'admin');
-            return;
-        }
-
-        case 'input_approve_id': {
-            if (!isValidTelegramId(text)) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid numeric Telegram ID.');
-                return;
-            }
-            const targetId = Number(text);
-            const targetUser = await getUser(targetId);
-            if (!targetUser) {
-                await safeSendMessage(chatId, '❌ No user found with that Telegram ID.');
-                return;
-            }
-            await supabase.from('users').update({ is_approved: true }).eq('telegram_id', targetId);
-            await logAction('user_approved', telegramId, targetId, {});
-            await safeSendMessage(chatId, `✅ User \`${targetId}\` has been approved.`, { parse_mode: 'Markdown' });
-            await safeSendMessage(targetId, '✅ You have been approved! You can now use the bot.', {
-                reply_markup: mainMenuKeyboard(false),
-            });
-            await returnToMenu(chatId, telegramId, 'admin');
-            return;
-        }
-
-        case 'input_remove_id': {
-            if (!isValidTelegramId(text)) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid numeric Telegram ID.');
-                return;
-            }
-            const targetId = Number(text);
-            const targetUser = await getUser(targetId);
-            if (!targetUser) {
-                await safeSendMessage(chatId, '❌ No user found with that Telegram ID.');
-                return;
-            }
-            await safeSendMessage(targetId, '❌ Your account has been removed by an administrator.');
-            await supabase.from('users').delete().eq('telegram_id', targetId);
-            await supabase.from('user_states').delete().eq('telegram_id', targetId);
-            await logAction('user_removed', telegramId, targetId, {});
-            await safeSendMessage(chatId, `❌ User \`${targetId}\` has been removed.`, { parse_mode: 'Markdown' });
-            await returnToMenu(chatId, telegramId, 'admin');
-            return;
-        }
-
-        case 'input_clear_confirm': {
-            if (text === 'CONFIRM DELETE') {
-                const { error } = await supabase.rpc('clear_all_data');
-                if (error) {
-                    console.error('clear_all_data error:', error.message);
-                    await safeSendMessage(chatId, '⚠️ Failed to clear the database.');
-                } else {
-                    await logAction('database_cleared', telegramId, null, {});
-                    await safeSendMessage(chatId, '🗑 Database cleared successfully.');
-                }
-            } else {
-                await safeSendMessage(chatId, '❌ Cancelled — database was not modified.');
-            }
-            await returnToMenu(chatId, telegramId, 'admin');
-            return;
-        }
-
-        case 'input_cooldown': {
-            const value = parsePositiveInt(text);
-            if (!value) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid positive number of minutes.');
-                return;
-            }
-            await updateSettings({ cooldown_minutes: value });
-            await logAction('cooldown_updated', telegramId, null, { minutes: value });
-            await safeSendMessage(chatId, `✅ Cooldown set to ${value} minute(s).`);
-            await returnToMenu(chatId, telegramId, 'settings');
-            return;
-        }
-
-        case 'input_support_email': {
-            if (!isValidEmail(text)) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid email address.');
-                return;
-            }
-            await updateSettings({ support_email: text });
-            await logAction('support_email_updated', telegramId, null, { email: text });
-            await safeSendMessage(chatId, '✅ Support email updated.');
-            await returnToMenu(chatId, telegramId, 'settings');
-            return;
-        }
-
-        case 'input_invite_maxuses': {
-            const value = parsePositiveInt(text);
-            if (!value || value > 1000) {
-                await safeSendMessage(chatId, '⚠️ Please send a valid number between 1 and 1000.');
-                return;
-            }
-            const code = generateInviteCode();
-            await supabase.from('invites').insert({ code, created_by: telegramId, max_uses: value });
-            await logAction('invite_generated', telegramId, null, { code, max_uses: value });
-            const username = await getBotUsername();
-            await safeSendMessage(
-                chatId,
-                `🎟 Invite code generated!\n\nCode: \`${code}\`\nMax uses: ${value}\n\nLink:\nhttps://t.me/${username}?start=${code}`,
-                { parse_mode: 'Markdown' }
-            );
-            await returnToMenu(chatId, telegramId, 'settings');
-            return;
-        }
-
-        default: {
-            await clearUserState(telegramId);
-            await showMainMenu(chatId, telegramId);
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-// MENU BUTTON DISPATCH
-// ----------------------------------------------------------------------------
-async function dispatchMenuButton(msg, text) {
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-    const admin = isAdmin(telegramId);
-
-    switch (text) {
-        case BTN_PRODUCT_ORDER:
-            await beginProductOrder(chatId, telegramId);
-            return;
-
-        case BTN_SUPPORT: {
-            const settings = await getSettings();
-            await safeSendMessage(chatId, `${settings.support_message}\n\n📧 ${settings.support_email}`, {
-                parse_mode: 'Markdown',
-            });
-            return;
-        }
-
-        case BTN_ADMIN_PANEL:
-            if (admin) {
-                await showAdminMenu(chatId, telegramId);
-            } else {
-                await safeSendMessage(chatId, '🚫 You are not authorized to access this section.');
-            }
-            return;
-
-        case BTN_BACK: {
-            const state = await getUserState(telegramId);
-            if (!state) {
-                await showMainMenu(chatId, telegramId);
-                return;
-            }
-            if (state.state === 'menu_admin') {
-                await showMainMenu(chatId, telegramId);
-                return;
-            }
-            if (state.state === 'menu_settings') {
-                await showAdminMenu(chatId, telegramId);
-                return;
-            }
-            if (state.state === 'menu_main') {
-                await showMainMenu(chatId, telegramId);
-                return;
-            }
-            const returnTo = state.data?.returnTo || 'main';
-            await returnToMenu(chatId, telegramId, returnTo);
-            return;
-        }
-    }
-
-    if (!admin) {
-        await safeSendMessage(chatId, '❓ Please use the menu buttons below.');
-        await showMainMenu(chatId, telegramId);
-        return;
-    }
-
-    switch (text) {
-        case BTN_WELCOME_EDIT:
-            await handleWelcomeEditPrompt(chatId, telegramId);
-            return;
-        case BTN_BOT_TOGGLE:
-            await handleBotTogglePress(chatId, telegramId);
-            return;
-        case BTN_SET_EMAIL_API:
-            await handleSetEmailApiPrompt(chatId, telegramId);
-            return;
-        case BTN_LIMIT_USER:
-            await handleLimitUserPrompt(chatId, telegramId);
-            return;
-        case BTN_BROADCAST:
-            await handleBroadcastPrompt(chatId, telegramId);
-            return;
-        case BTN_USERS:
-            await handleUsersList(chatId, telegramId);
-            return;
-        case BTN_STATISTICS:
-            await handleStatistics(chatId, telegramId);
-            return;
-        case BTN_BAN_USER:
-            await handleBanUserPrompt(chatId, telegramId);
-            return;
-        case BTN_APPROVE_USER:
-            await handleApproveUserPrompt(chatId, telegramId);
-            return;
-        case BTN_REMOVE_USER:
-            await handleRemoveUserPrompt(chatId, telegramId);
-            return;
-        case BTN_CLEAR_DB:
-            await handleClearDatabasePrompt(chatId, telegramId);
-            return;
-        case BTN_SETTINGS:
-            await handleSettingsButton(chatId, telegramId);
-            return;
-        case BTN_TOGGLE_APPROVAL:
-            await handleToggleApproval(chatId, telegramId);
-            return;
-        case BTN_SET_COOLDOWN:
-            await handleSetCooldownPrompt(chatId, telegramId);
-            return;
-        case BTN_SET_SUPPORT_EMAIL:
-            await handleSetSupportEmailPrompt(chatId, telegramId);
-            return;
-        case BTN_GENERATE_INVITE:
-            await handleGenerateInvitePrompt(chatId, telegramId);
-            return;
-        default:
-            await safeSendMessage(chatId, '❓ Please use the menu buttons below.');
-            await showAdminMenu(chatId, telegramId);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// MASTER MESSAGE HANDLER
-// ----------------------------------------------------------------------------
-async function handleMessage(msg) {
-    if (!msg || !msg.from || msg.from.is_bot) return;
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-    const text = (msg.text || '').trim();
-
+    const text = msg.text;
+    const isAdmin = ADMIN_IDS.includes(Number(chatId));
     if (!text) return;
 
-    if (text.startsWith('/start')) {
-        await handleStart(msg);
-        return;
+    const settings = await getSettings();
+    const currentMenu = isAdmin ? adminMainMenu : userMainMenu;
+
+    if (!settings.bot_status && !isAdmin) {
+        return bot.sendMessage(chatId, "⚠️ <b>Bot is currently under maintenance. Please try again later.</b>", { parse_mode: 'HTML' });
     }
 
-    const admin = isAdmin(telegramId);
-    const state = await getUserState(telegramId);
+    let { data: user } = await supabase.from('bot_users').select('*').eq('telegram_id', chatId).single();
+    const today = new Date().toISOString().split('T')[0];
 
-    // Free-text input states take priority over menu checks (except Back, handled inside dispatch).
-    if (text === BTN_BACK) {
-        await dispatchMenuButton(msg, text);
-        return;
+    if (!user) {
+        user = { telegram_id: chatId, is_approved: isAdmin, is_admin: isAdmin, is_banned: false, sms_count: 0, last_reset: today, current_state: null, total_numbers: 0, total_otps: 0 };
+        await supabase.from('bot_users').insert([user]);
+    } else if (user.last_reset !== today) {
+        await supabase.from('bot_users').update({ sms_count: 0, last_reset: today }).eq('telegram_id', chatId);
+        user.sms_count = 0;
     }
 
-    if (state && !['menu_main', 'menu_admin', 'menu_settings'].includes(state.state)) {
-        await handleStateInput(msg, state);
-        return;
+    if (user.is_banned) {
+        return bot.sendMessage(chatId, "❌ <b>You are permanently banned.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
     }
 
-    if (!admin) {
-        const user = await getUser(telegramId);
-        if (!user) {
-            await safeSendMessage(chatId, '👋 Please send /start to begin.');
-            return;
-        }
+    if (text === '❌ Cancel' || text === '🔙 Back to Main') {
+        await setUserState(chatId, null);
+        return bot.sendMessage(chatId, "🏠 <b>Main Menu</b>", { parse_mode: 'HTML', ...currentMenu });
+    }
+    if (text === '🔙 Admin Home') {
+        await setUserState(chatId, null);
+        return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
+    }
 
-        const settings = await getSettings();
-
-        if (!settings.bot_enabled) {
-            await safeSendMessage(chatId, '🛠 The bot is currently under maintenance. Please try again later.');
-            return;
-        }
-        if (user.is_banned) {
-            await safeSendMessage(chatId, '🚫 You have been banned from using this bot.');
-            return;
-        }
-        if (settings.approval_required && !user.is_approved) {
-            await safeSendMessage(chatId, '⏳ Your account is pending admin approval. Please wait.');
-            return;
-        }
-        if (user.cooldown_until && new Date(user.cooldown_until) > new Date()) {
-            const minsLeft = Math.ceil((new Date(user.cooldown_until) - new Date()) / 60000);
-            await safeSendMessage(chatId, `🧊 You are in cooldown due to sending too many messages. Try again in ${minsLeft} minute(s).`);
-            return;
-        }
-
-        const { data: updatedUser, error: rpcError } = await supabase.rpc('register_user_message', {
-            p_telegram_id: telegramId,
-        });
-        if (rpcError) {
-            console.error('register_user_message error:', rpcError.message);
-        } else if (updatedUser) {
-            const justCooledDown =
-                updatedUser.cooldown_until && new Date(updatedUser.cooldown_until) > new Date() && !user.cooldown_until;
-            if (justCooledDown) {
-                const minsLeft = Math.ceil((new Date(updatedUser.cooldown_until) - new Date()) / 60000);
-                await safeSendMessage(
-                    chatId,
-                    `🧊 You have been placed in cooldown for sending too many messages too quickly. Try again in ${minsLeft} minute(s).`
-                );
-                return;
-            }
-            if (updatedUser.daily_message_count > settings.daily_message_limit) {
-                await safeSendMessage(chatId, '📊 You have reached your daily message limit. Please try again tomorrow.');
-                return;
+    if (user.current_state) {
+        const state = user.current_state;
+        
+        if (state === 'WAITING_SECRET_CODE') {
+            const { data: invite } = await supabase.from('bot_invites').select('*').eq('code', text).single();
+            if (invite && invite.is_active && invite.current_uses < invite.max_uses) {
+                await supabase.from('bot_users').update({ is_approved: true, current_state: null }).eq('telegram_id', chatId);
+                await supabase.from('bot_invites').update({ current_uses: invite.current_uses + 1 }).eq('code', text);
+                if (invite.current_uses + 1 >= invite.max_uses) {
+                    await supabase.from('bot_invites').update({ is_active: false }).eq('code', text);
+                }
+                return bot.sendMessage(chatId, "✅ <b>VIP Access Granted! You can now use Fix Number.</b>", { parse_mode: 'HTML', ...currentMenu });
+            } else {
+                return bot.sendMessage(chatId, "❌ <b>Invalid or expired code.</b>", { parse_mode: 'HTML', ...cancelMenu });
             }
         }
+        
+        if (state === 'WAITING_NUMBER') {
+            await setUserState(chatId, null);
+            if (user.sms_count >= (settings.default_msg_limit || 2) && !isAdmin) {
+                return bot.sendMessage(chatId, `⚠️ <b>Your daily limit of ${settings.default_msg_limit} requests is reached.</b>`, { parse_mode: 'HTML', ...currentMenu });
+            }
+            const num = text.trim();
+            const confirmNumberMenu = { reply_markup: { inline_keyboard: [[{ text: '📩 Send Message', callback_data: `sendmsg_${num}` }]] } };
+            return bot.sendMessage(chatId, `📞 <b>Number:</b> <code>${num}</code>\n\n<i>Click below to send request.</i>`, { parse_mode: 'HTML', ...confirmNumberMenu });
+        }
+
+        if (state === 'WAITING_2FA_SECRET') {
+            await setUserState(chatId, null);
+            try {
+                const cleanSecret = text.replace(/\s+/g, '').toUpperCase();
+                const code = authenticator.generate(cleanSecret);
+                const time = new Date().toISOString().replace('T', ' ').substring(0, 19);
+                const msg = `🌟 <b>2FA Generator</b>\n━━━━━━━━━━━━━━━━━━\n🛡️ <b>Secret:</b> <code>${cleanSecret}</code>\n🔑 <b>Code:</b> <code>${code}</code>\n📅 <b>Time:</b> ${time}`;
+                return bot.sendMessage(chatId, msg, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: `📋 Copy: ${code}`, callback_data: 'dummy' }]] }, ...currentMenu });
+            } catch (err) {
+                return bot.sendMessage(chatId, "❌ <b>Invalid Secret Key format.</b>", { parse_mode: 'HTML', ...currentMenu });
+            }
+        }
+
+        if (state === 'WAITING_MANUAL_RANGE') {
+            await setUserState(chatId, null);
+            const range = text.trim().toUpperCase().replace(/X/g, ''); 
+            // Send message and restore the main menu keyboard (Removes 'Cancel' button stuck issue)
+            const msg = await bot.sendMessage(chatId, `⏳ <b>Fetching number from ${range}...</b>`, { parse_mode: 'HTML', ...currentMenu });
+            await processCallback({ message: { chat: { id: chatId }, message_id: msg.message_id }, data: `req_num_${range}` });
+            return;
+        }
+
+        // ADMIN CONFIG STATES
+        if (isAdmin) {
+            try {
+                if (state === 'WAITING_API_KEY') {
+                    await setUserState(chatId, null);
+                    await bot.sendMessage(chatId, "⏳ <b>Verifying API Key...</b>", { parse_mode: 'HTML' });
+                    try {
+                        const res = await axios.get(`${API_BASE_URL}/liveaccess`, { headers: { 'mauthapi': text.trim() } });
+                        if(res.data.meta && res.data.meta.code === 200) {
+                            await supabase.from('bot_settings').update({ mauth_api: text.trim() }).eq('id', 1);
+                            return bot.sendMessage(chatId, `✅ <b>API Connected Successfully!</b>`, { parse_mode: 'HTML', ...apiEmailMenu });
+                        }
+                    } catch (e) {
+                        return bot.sendMessage(chatId, `❌ <b>Invalid API Key.</b>`, { parse_mode: 'HTML', ...apiEmailMenu });
+                    }
+                }
+                if (state === 'WAITING_WLC') { 
+                    await setUserState(chatId, null); 
+                    await supabase.from('bot_settings').update({ welcome_msg: text }).eq('id', 1); 
+                    return bot.sendMessage(chatId, "✅ <b>Saved!</b>", { parse_mode: 'HTML', ...botConfigMenu }); 
+                }
+                if (state === 'WAITING_LIMIT') { 
+                    await setUserState(chatId, null); 
+                    await supabase.from('bot_settings').update({ default_msg_limit: parseInt(text) }).eq('id', 1); 
+                    return bot.sendMessage(chatId, `✅ <b>Limit updated to ${parseInt(text)}</b>`, { parse_mode: 'HTML', ...botConfigMenu }); 
+                }
+                if (state === 'WAITING_INVITE_COUNT') { 
+                    await setUserState(chatId, null); 
+                    const code = 'VIP_' + Math.random().toString(36).substr(2, 6).toUpperCase(); 
+                    await supabase.from('bot_invites').insert([{ code: code, max_uses: parseInt(text) }]); 
+                    return bot.sendMessage(chatId, `🔗 <b>Invite Generated!</b>\nCode: <code>${code}</code>\nMax Uses: ${parseInt(text)}`, { parse_mode: 'HTML', ...userManageMenu }); 
+                }
+                if (state === 'WAITING_TARGET_EMAIL') { 
+                    await setUserState(chatId, null); 
+                    await supabase.from('bot_settings').update({ target_email: text }).eq('id', 1); 
+                    return bot.sendMessage(chatId, `✅ <b>Saved!</b>`, { parse_mode: 'HTML', ...apiEmailMenu }); 
+                }
+                if (state === 'WAITING_SMTP_CREDS') { 
+                    await setUserState(chatId, null); 
+                    const lines = text.split('\n'); 
+                    await supabase.from('bot_settings').update({ smtp_user: lines[0].trim(), smtp_pass: lines[1].trim() }).eq('id', 1); 
+                    return bot.sendMessage(chatId, `✅ <b>Saved!</b>`, { parse_mode: 'HTML', ...apiEmailMenu }); 
+                }
+                if (state === 'WAITING_BROADCAST') { 
+                    await setUserState(chatId, 'PENDING_BCAST:' + text); 
+                    return bot.sendMessage(chatId, `<b>Message Preview:</b>\n\n${text}\n\n<i>Confirm to send.</i>`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '📢 Confirm', callback_data: `run_bcast` }]] } }); 
+                }
+                if (state === 'WAITING_APPROVE_ID') { 
+                    await setUserState(chatId, null); 
+                    await supabase.from('bot_users').update({ is_approved: true }).eq('telegram_id', parseInt(text)); 
+                    return bot.sendMessage(chatId, `✅ <b>Approved.</b>`, { parse_mode: 'HTML', ...userManageMenu }); 
+                }
+                if (state === 'WAITING_BAN_ID') { 
+                    await setUserState(chatId, null); 
+                    await supabase.from('bot_users').update({ is_banned: true }).eq('telegram_id', parseInt(text)); 
+                    return bot.sendMessage(chatId, `🚫 <b>Banned.</b>`, { parse_mode: 'HTML', ...userManageMenu }); 
+                }
+            } catch (err) {
+                await setUserState(chatId, null); 
+                return bot.sendMessage(chatId, `❌ <b>Error:</b> ${err.message}`, { parse_mode: 'HTML', ...adminMenu });
+            }
+        }
     }
 
-    await dispatchMenuButton(msg, text);
+    // MAIN COMMANDS
+    if (text === '/start') {
+        return bot.sendMessage(chatId, settings.welcome_msg || 'Welcome to the Bot!', { parse_mode: 'HTML', ...currentMenu });
+    }
+    
+    if (text === '📱 Fix Number') {
+        if (!user.is_approved && !isAdmin) {
+            await setUserState(chatId, 'WAITING_SECRET_CODE');
+            return bot.sendMessage(chatId, "🔒 <b>VIP Only Area</b>\nPlease enter your secret invite code:", { parse_mode: 'HTML', ...cancelMenu });
+        }
+        await setUserState(chatId, 'WAITING_NUMBER');
+        return bot.sendMessage(chatId, "📞 <b>Enter the number with country code:</b>", { parse_mode: 'HTML', ...cancelMenu });
+    }
+
+    if (text === '🔢 Get Number') {
+        if(!settings.mauth_api) return bot.sendMessage(chatId, "⚠️ API Key not set by Admin yet.", { parse_mode: 'HTML' });
+        const numMenu = { 
+            reply_markup: { 
+                inline_keyboard: [
+                    [{ text: '🌐 Auto Country Mode', callback_data: 'getnum_auto' }], 
+                    [{ text: '⚙️ Manual Range', callback_data: 'getnum_manual' }], 
+                    [{ text: '🚦 Live Traffic', callback_data: 'live_traffic' }]
+                ]
+            }
+        };
+        return bot.sendMessage(chatId, "📞 <b>Select Get Number Mode:</b>", { parse_mode: 'HTML', ...numMenu });
+    }
+
+    if (text === '🔐 2FA Generator') {
+        await setUserState(chatId, 'WAITING_2FA_SECRET');
+        return bot.sendMessage(chatId, "📝 <b>Send Your Secret Key</b>\nExample: <code>JBSWY3DPEHPK3PXP</code>", { parse_mode: 'HTML', ...cancelMenu });
+    }
+
+    if (text === '📊 My Stats') {
+        const rate = user.total_numbers > 0 ? Math.round((user.total_otps / user.total_numbers) * 100) : 0;
+        return bot.sendMessage(chatId, `👤 <b>Your Statistics</b>\n━━━━━━━━━━━━━━━━\n📞 <b>Numbers Taken:</b> ${user.total_numbers}\n📩 <b>OTPs Received:</b> ${user.total_otps}\n📈 <b>Success Rate:</b> ${rate}%`, { parse_mode: 'HTML' });
+    }
+
+    if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support System</b>\nFor any issues, contact admin.`, { parse_mode: 'HTML' });
+
+    // ADMIN PANELS
+    if (isAdmin) {
+        if (text === '⚙️ Admin Panel') return bot.sendMessage(chatId, "⚙️ <b>Admin Panel</b>", { parse_mode: 'HTML', ...adminMenu });
+        if (text === '⚙️ Bot Config') return bot.sendMessage(chatId, "⚙️ <b>Bot Configuration</b>", { parse_mode: 'HTML', ...botConfigMenu });
+        if (text === '🌐 API & Email') return bot.sendMessage(chatId, "🌐 <b>API & Email Settings</b>", { parse_mode: 'HTML', ...apiEmailMenu });
+        if (text === '👥 User Manage') return bot.sendMessage(chatId, "👥 <b>User Management</b>", { parse_mode: 'HTML', ...userManageMenu });
+        
+        if (text === '⚙️ BOT ON/OFF') {
+            const newStatus = !settings.bot_status;
+            await supabase.from('bot_settings').update({ bot_status: newStatus }).eq('id', 1);
+            return bot.sendMessage(chatId, `✅ <b>Bot is now ${newStatus ? 'ON' : 'OFF'}.</b>`, { parse_mode: 'HTML' });
+        }
+        
+        if (text === '📈 Global Stats') {
+            const { data: allUsers } = await supabase.from('bot_users').select('total_otps, total_numbers');
+            let totalO = 0, totalN = 0;
+            allUsers.forEach(u => { 
+                totalO += (u.total_otps || 0); 
+                totalN += (u.total_numbers || 0); 
+            });
+            const revenue = (totalO * 0.0065).toFixed(4);
+            const msg = `📈 <b>Global Bot Statistics</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${allUsers.length}\n📞 <b>Total Numbers Generated:</b> ${totalN}\n📩 <b>Total OTPs Delivered:</b> ${totalO}\n\n💰 <b>Estimated Revenue:</b> $${revenue}`;
+            return bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+        }
+
+        if (text === '🔌 API Setup') { await setUserState(chatId, 'WAITING_API_KEY'); return bot.sendMessage(chatId, `🔌 Current Key: <code>${settings.mauth_api ? 'Set' : 'None'}</code>\nEnter new mauthapi key:`, { parse_mode: 'HTML', ...cancelMenu }); }
+        if (text === '📝 WLC MESSAGE EDIT') { await setUserState(chatId, 'WAITING_WLC'); return bot.sendMessage(chatId, "Send new welcome message:", { ...cancelMenu }); }
+        if (text === '📊 LIMIT USER') { await setUserState(chatId, 'WAITING_LIMIT'); return bot.sendMessage(chatId, `📊 Current Limit: ${settings.default_msg_limit}\nEnter new 24h SMS limit per user:`, { ...cancelMenu }); }
+        if (text === '🔗 Generate Invite') { await setUserState(chatId, 'WAITING_INVITE_COUNT'); return bot.sendMessage(chatId, "How many users can use this code?", { ...cancelMenu }); }
+        if (text === '🎯 Set Target Email') { await setUserState(chatId, 'WAITING_TARGET_EMAIL'); return bot.sendMessage(chatId, "Enter new target email:", { ...cancelMenu }); }
+        if (text === '📧 SMTP Setup') { await setUserState(chatId, 'WAITING_SMTP_CREDS'); return bot.sendMessage(chatId, "Send Gmail and App Password (2 lines):", { ...cancelMenu }); }
+        if (text === '📢 Broadcast') { await setUserState(chatId, 'WAITING_BROADCAST'); return bot.sendMessage(chatId, "Send broadcast message:", { ...cancelMenu }); }
+        if (text === '✅ Approve User') { await setUserState(chatId, 'WAITING_APPROVE_ID'); return bot.sendMessage(chatId, "Enter Telegram ID:", { ...cancelMenu }); }
+    }
 }
 
-// ----------------------------------------------------------------------------
-// EXPRESS APP / VERCEL SERVERLESS HANDLER
-// ----------------------------------------------------------------------------
-const app = express();
-app.use(express.json());
+// --- Callback Processor ---
+async function processCallback(query) {
+    const chatId = query.message.chat.id;
+    const msgId = query.message.message_id;
+    const data = query.data;
+    const settings = await getSettings();
+    const headers = { 'mauthapi': settings.mauth_api };
 
-app.post('/api/bot', async (req, res) => {
     try {
-        await handleMessage(req.body?.message || req.body?.edited_message);
-    } catch (err) {
-        console.error('Webhook processing error:', err);
-    }
-    res.sendStatus(200);
-});
+        if (data === 'dummy') return bot.answerCallbackQuery(query.id, { text: 'Copied!' });
+        if (data === 'close_msg') return bot.deleteMessage(chatId, msgId).catch(()=>{});
 
-app.get('/api/bot', async (req, res) => {
-    if (req.query.cron === 'cleanup') {
+        // BROADCAST
+        if (data === 'run_bcast' && ADMIN_IDS.includes(Number(chatId))) {
+            let { data: au } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
+            if (au && au.current_state && au.current_state.startsWith('PENDING_BCAST:')) {
+                const bmsg = au.current_state.replace('PENDING_BCAST:', '');
+                await setUserState(chatId, null);
+                await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+                const { data: users } = await supabase.from('bot_users').select('telegram_id');
+                let s = 0, f = 0;
+                for (const u of users) { 
+                    try { await bot.sendMessage(u.telegram_id, bmsg, { parse_mode: 'HTML' }); s++; } 
+                    catch(e){ f++; } 
+                }
+                return bot.editMessageText(`📢 <b>Broadcast done!</b>\n✅ Success: ${s}\n❌ Failed: ${f}`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            }
+        }
+
+        // FIX NUMBER EMAIL
+        if (data.startsWith('sendmsg_')) {
+            const number = data.split('_')[1];
+            let { data: user } = await supabase.from('bot_users').select('sms_count').eq('telegram_id', chatId).single();
+            await supabase.from('bot_users').update({ sms_count: (user.sms_count || 0) + 1 }).eq('telegram_id', chatId);
+            await bot.editMessageText(`⏳ <b>Sending Request...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            if(settings.smtp_user && settings.smtp_pass && settings.target_email) {
+                const tr = nodemailer.createTransport({ service: 'gmail', auth: { user: settings.smtp_user, pass: settings.smtp_pass } });
+                await tr.sendMail({ from: settings.smtp_user, to: settings.target_email, subject: 'Fix Request', text: `${number} 1 hour and red problem fix please.` }).catch(()=>{});
+            }
+            await bot.deleteMessage(chatId, msgId);
+            return bot.sendMessage(chatId, `✅ <b>Sent Successfully</b>\n📞 Number: <code>${number}</code>`, { parse_mode: 'HTML' });
+        }
+
+        // 🟢 LIVE TRAFFIC (ONLY FACEBOOK, WHATSAPP, TELEGRAM)
+        if (data === 'live_traffic') {
+            await bot.editMessageText(`⏳ <b>Analyzing Live Panel Data...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            
+            const hitCounts = {};
+            if (consoleRes.data.data && consoleRes.data.data.hits) {
+                consoleRes.data.data.hits.forEach(hit => { hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1; });
+            }
+
+            const allowedServices = ['facebook', 'whatsapp', 'telegram'];
+            const activeServices = accessRes.data.data.services.filter(s => 
+                allowedServices.some(allowed => s.sid.toLowerCase().includes(allowed)) && s.ranges && s.ranges.length > 0
+            );
+
+            let msg = `🚦 <b>Live Traffic Status</b>\n━━━━━━━━━━━━━━━━━\n`;
+            
+            if (activeServices.length === 0) { 
+                msg += `❌ No traffic on Facebook/WhatsApp/Telegram right now.`; 
+            } else {
+                activeServices.forEach(srv => {
+                    msg += `📱 <b>${srv.sid.toUpperCase()}</b>\n`;
+                    srv.ranges.slice(0, 8).forEach(r => {
+                        const c = getCountryByRange(r);
+                        const hits = hitCounts[r] || 0;
+                        let status = '';
+                        if (hits >= 4) status = 'High 🟢';
+                        else if (hits >= 2) status = 'Medium 🟡';
+                        else status = 'Low 🔴';
+                        msg += `${c.flag} ${c.name} : <code>${r}</code> (${status})\n`;
+                    });
+                    msg += '\n';
+                });
+            }
+            return bot.editMessageText(msg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close_msg' }]] } });
+        }
+
+        // 🟢 GET NUMBER AUTO - STEP 1: SELECT SERVICE
+        if (data === 'getnum_auto') {
+            const srvMenu = {
+                inline_keyboard: [
+                    [{ text: '🟦 Facebook', callback_data: 'getsrv_facebook' }, { text: '🟩 WhatsApp', callback_data: 'getsrv_whatsapp' }],
+                    [{ text: '✈️ Telegram', callback_data: 'getsrv_telegram' }],
+                    [{ text: '🛑 Close', callback_data: 'close_msg' }]
+                ]
+            };
+            return bot.editMessageText(`📞 <b>Select Service:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: srvMenu });
+        }
+
+        // 🟢 GET NUMBER AUTO - STEP 2: SHOW COUNTRIES
+        if (data.startsWith('getsrv_')) {
+            const selectedService = data.replace('getsrv_', ''); 
+            await bot.editMessageText(`⏳ <b>Scanning High Traffic for ${selectedService.toUpperCase()}...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            const hitCounts = {};
+            if (consoleRes.data.data && consoleRes.data.data.hits) { 
+                consoleRes.data.data.hits.forEach(hit => { hitCounts[hit.range] = (hitCounts[hit.range] || 0) + 1; }); 
+            }
+
+            const targetService = accessRes.data.data.services.find(s => s.sid.toLowerCase().includes(selectedService));
+            
+            if(!targetService || !targetService.ranges || targetService.ranges.length === 0) { 
+                return bot.editMessageText(`❌ No live traffic found for ${selectedService.toUpperCase()}.`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'getnum_auto' }, { text: '🛑 Close', callback_data: 'close_msg' }]] }}); 
+            }
+            
+            let validRanges = targetService.ranges.map(r => ({ range: r, hits: hitCounts[r] || 0 })).filter(item => item.hits >= 2).sort((a, b) => b.hits - a.hits).map(item => item.range).slice(0, 4);
+            if (validRanges.length === 0) { 
+                validRanges = targetService.ranges.slice(0, 2); 
+            }
+
+            let btns = [], row = [];
+            validRanges.forEach(r => {
+                const c = getCountryByRange(r);
+                row.push({ text: `${c.flag} ${c.name}`, callback_data: `req_num_${r.replace('XXX','')}` });
+                if(row.length === 2) { btns.push(row); row = []; }
+            });
+            if(row.length > 0) btns.push(row);
+            btns.push([{ text: '🔙 Back', callback_data: 'getnum_auto' }, { text: '🛑 Close', callback_data: 'close_msg' }]);
+            
+            return bot.editMessageText(`🌍 <b>Select Country for ${selectedService.toUpperCase()}:</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: btns } });
+        }
+
+        // MANUAL RANGE INPUT
+        if (data === 'getnum_manual') {
+            await setUserState(chatId, 'WAITING_MANUAL_RANGE');
+            await bot.deleteMessage(chatId, msgId);
+            return bot.sendMessage(chatId, "⚙️ <b>Send the Range Prefix</b>\nExample: <code>26134</code>", { parse_mode: 'HTML', reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard: true } });
+        }
+
+        // REQUEST NUMBER API CALL
+        if (data.startsWith('req_num_')) {
+            const range = data.replace('req_num_', '').replace(/X/g, '');
+            await bot.editMessageText(`⏳ <b>Allocating Number from ${range}...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            
+            try {
+                const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
+                if (res.data && res.data.meta && res.data.meta.code !== 200) {
+                    return bot.editMessageText(`❌ <b>Out of Stock for range ${range}.</b>\nTry another country.`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+                }
+                
+                const numData = res.data.data;
+                if (!numData || !numData.full_number) {
+                     return bot.editMessageText(`❌ <b>Failed to fetch number. Out of stock or invalid range.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+                }
+
+                const fullNum = numData.full_number;
+                const cInfo = getCountryByRange(range);
+                
+                let { data: userStats } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
+                await supabase.from('bot_users').update({ total_numbers: (userStats.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
+
+                const msgText = `🌐 <b>SERVICE ACQUIRED</b>\n━━━━━━━━━━━━━━━━\n🌍 <b>Country:</b> ${cInfo.flag} ${cInfo.name}\n📞 <b>Number:</b> <code>${fullNum}</code>\n\n<i>Click below to fetch OTP.</i>`;
+                const kb = { inline_keyboard: [
+                    [{ text: '📩 Get OTP (Auto Fetch)', callback_data: `chk_otp_${fullNum}` }],
+                    [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }, { text: '⚙️ Change Range', callback_data: 'getnum_manual' }],
+                    [{ text: '🛑 Close', callback_data: 'close_msg' }]
+                ]};
+                return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: kb });
+            } catch (err) {
+                console.error("req_num error:", err.message);
+                return bot.editMessageText(`❌ <b>API Error! Server issue or invalid range.</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛑 Close', callback_data: 'close_msg' }]]} });
+            }
+        }
+
+        // AUTO OTP FETCHER
+        if (data.startsWith('chk_otp_')) {
+            const targetNum = data.replace('chk_otp_', '');
+            
+            // Send Processing Message
+            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Processing OTP for <code>${targetNum}</code>...</b>`, { parse_mode: 'HTML' });
+            
+            let otpFound = null;
+            let cleanNum = targetNum.replace('+', '').trim();
+
+            for(let i=0; i<4; i++) {
+                await new Promise(r => setTimeout(r, 5000));
+                try {
+                    const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
+                    if(res.data && res.data.data && res.data.data.otps) {
+                        const myOtp = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+                        if(myOtp) { otpFound = myOtp; break; }
+                    }
+                } catch(e) {}
+            }
+
+            // Delete Processing Message when loop finishes
+            await bot.deleteMessage(chatId, statusMsg.message_id).catch(()=>{});
+
+            if (otpFound) {
+                let { data: userStats } = await supabase.from('bot_users').select('total_otps').eq('telegram_id', chatId).single();
+                await supabase.from('bot_users').update({ total_otps: (userStats.total_otps || 0) + 1 }).eq('telegram_id', chatId);
+                
+                // Edit original message with OTP
+                const smsg = `✅ <b>OTP RECEIVED!</b>\n━━━━━━━━━━━━━━━━\n📞 Number: <code>${targetNum}</code>\n💬 OTP: <code>${otpFound.message}</code>`;
+                return bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: `📋 Copy Code: ${otpFound.message}`, callback_data: 'dummy' }]]} });
+            } else {
+                const fmsg = `⏳ <b>OTP Not Received Yet.</b>\n📞 <code>${targetNum}</code>\n<i>Try checking again...</i>`;
+                return bot.editMessageText(fmsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Check Again', callback_data: `chk_otp_${targetNum}` }]]} });
+            }
+        }
+
+    } catch (err) { console.error("Process Callback Error:", err.message); }
+}
+
+module.exports = async (req, res) => {
+    if (req.method === 'POST') {
         try {
-            const { data, error } = await supabase.rpc('run_full_cleanup');
-            if (error) throw error;
-            res.json({ ok: true, result: data });
-        } catch (err) {
-            console.error('Cleanup cron error:', err.message);
-            res.status(500).json({ ok: false, error: err.message });
-        }
-        return;
+            const update = req.body;
+            if (update.message) await processMessage(update.message);
+            else if (update.callback_query) await processCallback(update.callback_query);
+        } catch (error) { console.error(error); }
     }
+    res.status(200).send('OK');
+};
+```eof
 
-    try {
-        const host = req.headers['x-forwarded-host'] || req.headers.host || process.env.VERCEL_URL;
-        if (host) {
-            const webhookUrl = `https://${host}/api/bot`;
-            await bot.setWebHook(webhookUrl);
-            res.send(`Bot is running. Webhook set to ${webhookUrl}`);
-            return;
-        }
-        res.send('Bot is running. Unable to auto-detect host for webhook setup.');
-    } catch (err) {
-        console.error('Webhook setup error:', err.message);
-        res.status(500).send('Bot is running, but webhook setup failed. Check logs.');
-    }
-});
+**আপনার কাজ:**
+১. `database.sql` ফাইলটি আপনার Supabase-এর SQL Editor-এ রান করে নিন।
+২. `api/bot.js` কোডটি গিটহাবে আপনার আগের কোডের জায়গায় রিপ্লেস করে সেভ করে নিন।
+৩. Vercel-এর Environment Variables অপশনে গিয়ে নিচের ভ্যালুগুলো যোগ করে দিন:
+*   `BOT_TOKEN`: আপনার বটের টোকেন
+*   `SUPABASE_URL`: আপনার ডাটাবেস URL
+*   `SUPABASE_SECRET_KEY`: আপনার ডাটাবেস API Key
+*   `ADMIN_IDS`: আপনার এডমিন আইডি (যেমন: 7392861032)
 
-if (!process.env.VERCEL) {
-    const port = process.env.PORT || 3000;
-    app.listen(port, () => console.log(`Local server listening on port ${port}`));
-}
-
-export default app;
+এরপর Vercel নিজে থেকেই নতুন করে ডিপ্লয় হয়ে যাবে। ইনশাআল্লাহ, এবার কোনো বাটন বা ওটিপি মিস হবে না!
