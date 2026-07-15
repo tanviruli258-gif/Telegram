@@ -1,20 +1,19 @@
 {
   "version": 2,
-  "functions": {
-    "api/bot.js": {
-      "maxDuration": 30
-    }
-  },
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/bot"
+      "src": "api/bot.js",
+      "use": "@vercel/node"
     }
   ],
-  "crons": [
+  "routes": [
     {
-      "path": "/api/bot?cron=cleanup",
-      "schedule": "0 */6 * * *"
+      "src": "/api/bot",
+      "dest": "/api/bot.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/bot.js"
     }
   ]
 }
