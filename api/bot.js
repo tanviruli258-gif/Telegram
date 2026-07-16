@@ -17,13 +17,13 @@ const bot = new TelegramBot(BOT_TOKEN);
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
 // ============================================================================
-// 2. PROFESSIONAL MENUS & UI (MATCHING SCREENSHOTS)
+// 2. PROFESSIONAL MENUS & UI
 // ============================================================================
 const getMainMenu = (isAdmin) => {
     const kb = [
         ['🚀 Get Number', '⚙️ Set Range'],
         ['🚦 Traffic', '🔐 2FA'],
-        ['📊 My Stats', '🎧 Support']
+        ['🎧 Support'] // লম্বা বাটন
     ];
     if (isAdmin) kb.push(['👑 Admin Panel']);
     return { reply_markup: { keyboard: kb, resize_keyboard: true } };
@@ -33,8 +33,8 @@ const adminMenu = {
     reply_markup: { 
         keyboard: [
             ['🌐 API Setup', '📢 Broadcast'], 
-            ['💳 Manage Credits', '🚫 Ban / Unban'],
-            ['📈 Global Stats', '🔙 Back to Main']
+            ['🚫 Ban / Unban', '📈 Global Stats'],
+            ['🔙 Back to Main']
         ], 
         resize_keyboard: true 
     } 
@@ -48,7 +48,7 @@ const cancelMenu = { reply_markup: { keyboard: [['❌ Cancel']], resize_keyboard
 async function getUser(chatId) {
     let { data: user } = await supabase.from('bot_users').select('*').eq('telegram_id', chatId).single();
     if (!user) {
-        user = { telegram_id: chatId, credits: 50, saved_range: null, current_state: null, total_numbers: 0, total_otps: 0 };
+        user = { telegram_id: chatId, saved_range: null, current_state: null, total_numbers: 0, total_otps: 0 };
         await supabase.from('bot_users').insert([user]);
     }
     return user;
@@ -58,13 +58,13 @@ async function updateState(chatId, state) {
     await supabase.from('bot_users').update({ current_state: state }).eq('telegram_id', chatId);
 }
 
-// Extract OTP Code from full message
+// Extract OTP Code elegantly
 function extractOTP(message) {
     const match = message.match(/\b\d{4,8}\b/);
     return match ? match[0] : message;
 }
 
-// 🚀 CORE NUMBER FETCHER (With Beautiful UI)
+// 🚀 NUMBER FETCHER (Beautiful UI)
 async function fetchNumberAction(chatId, range, settings) {
     const msg = await bot.sendMessage(chatId, `⏳ <b>Allocating new number from <code>${range}</code>...</b>`, { parse_mode: 'HTML' });
     try {
@@ -85,7 +85,6 @@ async function fetchNumberAction(chatId, range, settings) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        // Beautiful Output Matching the Screenshot
         const msgText = `🆕 <b>New number allocated!</b>\n\n📱 Number: <code>${fullNum}</code>\n📋 Range: <code>${range}</code>\n⏳ Checking for OTP in real-time...\n\n<i>(Tap the number above to copy it instantly)</i>`;
         
         const kb = { inline_keyboard: [
@@ -120,21 +119,19 @@ async function processMessage(msg) {
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are banned from using this bot.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
     // ------------------------------------------------------------------------
-    // STATE ENGINE (Handling Inputs)
+    // STATE ENGINE 
     // ------------------------------------------------------------------------
     const state = user.current_state;
 
-    // SET RANGE
     if (state === 'WAITING_RANGE') {
         const range = text.trim().toUpperCase().replace(/X/g, '');
         if(isNaN(range)) return bot.sendMessage(chatId, "⚠️ <b>Invalid range! Please send numbers only.</b>", { parse_mode: 'HTML' });
         
         await updateState(chatId, null);
         await supabase.from('bot_users').update({ saved_range: range }).eq('telegram_id', chatId);
-        return bot.sendMessage(chatId, `✅ <b>Range Successfully Saved!</b>\n\nYour active range is now: <code>${range}</code>\n<i>Click 'Get Number' to start working.</i>`, { parse_mode: 'HTML', ...mainMenu });
+        return bot.sendMessage(chatId, `✅ <b>Range Successfully Saved!</b>\n\n🎯 <b>Active Range:</b> <code>${range}</code>\n<i>Click 'Get Number' to start working.</i>`, { parse_mode: 'HTML', ...mainMenu });
     }
 
-    // 2FA GENERATOR
     if (state === 'WAITING_2FA_SECRET') {
         await updateState(chatId, null);
         try {
@@ -146,29 +143,11 @@ async function processMessage(msg) {
         }
     }
 
-    // ADMIN STATES
     if (isAdmin) {
         if (state === 'WAITING_API_KEY') {
             await supabase.from('bot_settings').update({ mauth_api: text.trim() }).eq('id', 1);
             await updateState(chatId, null);
             return bot.sendMessage(chatId, "✅ <b>API Key Updated Successfully!</b>", { parse_mode: 'HTML', ...adminMenu });
-        }
-        if (state === 'WAITING_MANAGE_CREDIT') {
-            const parts = text.split(' ');
-            if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) {
-                return bot.sendMessage(chatId, "⚠️ Send as: <code>TelegramID Amount</code>", { parse_mode: 'HTML' });
-            }
-            const targetId = Number(parts[0]);
-            const amount = Number(parts[1]);
-            
-            let { data: targetUser } = await supabase.from('bot_users').select('credits').eq('telegram_id', targetId).single();
-            if (!targetUser) return bot.sendMessage(chatId, "❌ User not found.", { parse_mode: 'HTML' });
-            
-            const newBal = (targetUser.credits || 0) + amount;
-            await supabase.from('bot_users').update({ credits: newBal }).eq('telegram_id', targetId);
-            await updateState(chatId, null);
-            bot.sendMessage(targetId, `💰 <b>Admin updated your balance!</b>\nNew balance: <b>${newBal} Credits</b>`, { parse_mode: 'HTML' }).catch(()=>{});
-            return bot.sendMessage(chatId, `✅ <b>Success!</b>\nNew Balance: ${newBal}`, { parse_mode: 'HTML', ...adminMenu });
         }
         if (state === 'WAITING_BROADCAST') {
             await updateState(chatId, `CONFIRM_BCAST:${text}`);
@@ -190,20 +169,16 @@ async function processMessage(msg) {
     }
     
     if (text === '⚙️ Set Range') {
+        const current = user.saved_range ? `<code>${user.saved_range}</code> (Active ✅)` : `<b>None</b> ❌`;
         await updateState(chatId, 'WAITING_RANGE');
-        return bot.sendMessage(chatId, "🔢 <b>Enter the Range ID</b>\n\nPlease type the Range ID you want to get a number from (e.g. <code>26134</code> or <code>22501XXX</code>):", { parse_mode: 'HTML', ...cancelMenu });
+        return bot.sendMessage(chatId, `⚙️ <b>Range Configuration</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Current Range:</b> ${current}\n\n🔢 Please type the new Range ID you want to set (e.g. <code>26134</code>):`, { parse_mode: 'HTML', ...cancelMenu });
     }
 
     if (text === '🚀 Get Number') {
         if (!user.saved_range) {
             await updateState(chatId, 'WAITING_RANGE');
-            return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>\nPlease type the Range ID you want to use (e.g. 26134):", { parse_mode: 'HTML', ...cancelMenu });
+            return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>\nPlease type the Range ID you want to use (e.g. <code>26134</code>):", { parse_mode: 'HTML', ...cancelMenu });
         }
-        
-        if (user.credits <= 0) {
-            return bot.sendMessage(chatId, "❌ <b>Insufficient Credits! Contact Admin.</b>", { parse_mode: 'HTML' });
-        }
-
         const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
         return fetchNumberAction(chatId, user.saved_range, settings);
     }
@@ -232,10 +207,10 @@ async function processMessage(msg) {
             else {
                 activeServices.slice(0, 5).forEach(srv => {
                     trafficMsg += `🔷 <b>${srv.sid.toUpperCase()}</b>\n`;
-                    srv.ranges.slice(0, 4).forEach(r => {
+                    srv.ranges.slice(0, 5).forEach(r => {
                         const hits = hitCounts[r] || 0;
                         let s = hits >= 4 ? '🟢 High' : (hits >= 2 ? '🟡 Med' : '🔴 Low');
-                        trafficMsg += `  ⮑ <code>${r}</code> (${s})\n`;
+                        trafficMsg += `  🔸 <code>${r}</code> (${s})\n`;
                     });
                     trafficMsg += '\n';
                 });
@@ -246,25 +221,19 @@ async function processMessage(msg) {
         }
     }
 
-    if (text === '📊 My Stats') {
-        const profMsg = `👤 <b>Your Account Statistics</b>\n━━━━━━━━━━━━━━━━━\n🆔 <b>ID:</b> <code>${chatId}</code>\n💰 <b>Balance:</b> ${user.credits} Credits\n📞 <b>Numbers Taken:</b> ${user.total_numbers}\n📩 <b>OTPs Decoded:</b> ${user.total_otps}\n💾 <b>Active Range:</b> ${user.saved_range || 'Not Set'}`;
-        return bot.sendMessage(chatId, profMsg, { parse_mode: 'HTML' });
-    }
-
     if (text === '🎧 Support') {
-        return bot.sendMessage(chatId, `👨‍💻 <b>Support Center</b>\n\nIf you need any help, credits, or custom API access, please contact the Administrator.`, { parse_mode: 'HTML' });
+        return bot.sendMessage(chatId, `👨‍💻 <b>Support Center</b>\n\nFor API issues, range information, or any technical assistance, please contact the Administrator.`, { parse_mode: 'HTML' });
     }
 
     // ADMIN PANEL
     if (isAdmin) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...adminMenu });
+        
         if (text === '🌐 API Setup') {
+            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
+            const currentApi = (settings && settings.mauth_api) ? `<code>${settings.mauth_api.substring(0, 8)}...</code> (Active ✅)` : `<b>None</b> ❌`;
             await updateState(chatId, 'WAITING_API_KEY');
-            return bot.sendMessage(chatId, "🔑 <b>Provide the Master mauthapi Key:</b>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '💳 Manage Credits') {
-            await updateState(chatId, 'WAITING_MANAGE_CREDIT');
-            return bot.sendMessage(chatId, "💳 <b>Send format:</b> <code>TelegramID Amount</code>\nExample: <code>123456789 10</code>", { parse_mode: 'HTML', ...cancelMenu });
+            return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Current API:</b> ${currentApi}\n\n🔑 <b>Please provide the new Master mauthapi Key:</b>`, { parse_mode: 'HTML', ...cancelMenu });
         }
         if (text === '📢 Broadcast') {
             await updateState(chatId, 'WAITING_BROADCAST');
@@ -275,10 +244,10 @@ async function processMessage(msg) {
             return bot.sendMessage(chatId, "🚫 <b>Send Telegram ID to Ban:</b>", { parse_mode: 'HTML', ...cancelMenu });
         }
         if (text === '📈 Global Stats') {
-            const { data: users } = await supabase.from('bot_users').select('total_otps, total_numbers, credits');
-            let tOtp = 0, tNum = 0, tCred = 0;
-            users.forEach(u => { tOtp += u.total_otps; tNum += u.total_numbers; tCred += u.credits; });
-            return bot.sendMessage(chatId, `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users.length}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}\n💰 <b>Total Floating Credits:</b> ${tCred}`, { parse_mode: 'HTML' });
+            const { data: users } = await supabase.from('bot_users').select('total_otps, total_numbers');
+            let tOtp = 0, tNum = 0;
+            users.forEach(u => { tOtp += u.total_otps; tNum += u.total_numbers; });
+            return bot.sendMessage(chatId, `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users.length}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}`, { parse_mode: 'HTML' });
         }
     }
 }
@@ -330,9 +299,9 @@ async function processCallback(query) {
             await bot.deleteMessage(chatId, pMsg.message_id).catch(()=>{});
 
             if (otpFound) {
-                // Deduct Credit & Update Stats
-                let { data: u } = await supabase.from('bot_users').select('total_otps, credits').eq('telegram_id', chatId).single();
-                await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1, credits: Math.max(0, u.credits - 1) }).eq('telegram_id', chatId);
+                // Update Stats
+                let { data: u } = await supabase.from('bot_users').select('total_otps').eq('telegram_id', chatId).single();
+                await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', chatId);
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
                 // Smart Extraction of the Code
@@ -340,7 +309,7 @@ async function processCallback(query) {
                 const cleanCode = extractOTP(rawMessage);
 
                 // Re-format the entire message box beautifully
-                const smsg = `✅ **OTP Received Successfully!**\n\n📱 **Number:** <code>${num}</code>\n💬 **Full Message:** ${rawMessage}\n\n🔑 **Verification Code:**\n<code>${cleanCode}</code>`;
+                const smsg = `✅ <b>OTP Received Successfully!</b>\n\n📱 <b>Number:</b> <code>${num}</code>\n💬 <b>Full Message:</b> <i>${rawMessage}</i>\n\n🔑 <b>Verification Code:</b>\n<code>${cleanCode}</code>`;
                 
                 return bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
             } else {
@@ -352,7 +321,6 @@ async function processCallback(query) {
         }
     }
 
-    // Broadcast Engine
     if (data === 'run_bcast' && ADMIN_IDS.includes(Number(chatId))) {
         let { data: userState } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
         if (userState && userState.current_state && userState.current_state.startsWith('CONFIRM_BCAST:')) {
