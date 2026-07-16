@@ -65,12 +65,11 @@ function extractOTP(message) {
     return match ? match[0] : message;
 }
 
-// 🚀 NUMBER FETCHER ENGINE
+// 🚀 AUTO NUMBER FETCHER
 async function fetchNumberAction(chatId, range, settings) {
-    // Check if range is blacklisted
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.trim());
     if (blacklisted.includes(range)) {
-        return bot.sendMessage(chatId, `🚫 <b>Range Blocked!</b>\nThe range <code>${range}</code> is currently restricted by the Admin. Please set a different range.`, { parse_mode: 'HTML' });
+        return bot.sendMessage(chatId, `🚫 <b>Range Blocked!</b>\nThe range <code>${range}</code> is currently restricted by the Admin.`, { parse_mode: 'HTML' });
     }
 
     const msg = await bot.sendMessage(chatId, `⏳ <b>Allocating new number from <code>${range}</code>...</b>`, { parse_mode: 'HTML' });
@@ -125,16 +124,11 @@ async function processMessage(msg) {
     }
 
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are permanently banned from using this bot.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    
-    if (settings.maintenance_mode && !isAdmin) {
-        return bot.sendMessage(chatId, "🛠️ <b>System Update in Progress!</b>\nThe bot is currently under maintenance for improvements. Please try again later.", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    }
+    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, "🛠️ <b>System Update in Progress!</b>\nPlease try again later.", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
-    // ------------------------------------------------------------------------
-    // STATE ENGINE (Handling Inputs)
-    // ------------------------------------------------------------------------
     const state = user.current_state;
 
+    // USER STATES
     if (state === 'WAITING_RANGE') {
         const range = text.trim().toUpperCase().replace(/X/g, '');
         if(isNaN(range)) return bot.sendMessage(chatId, "⚠️ <b>Invalid range! Please send numbers only.</b>", { parse_mode: 'HTML' });
@@ -155,7 +149,7 @@ async function processMessage(msg) {
         }
     }
 
-    // 👑 ADVANCED ADMIN STATES
+    // ADMIN STATES
     if (isAdmin) {
         if (state === 'WAITING_API_KEY') {
             await supabase.from('bot_settings').update({ mauth_api: text.trim() }).eq('id', 1);
@@ -165,61 +159,38 @@ async function processMessage(msg) {
         if (state === 'WAITING_BLACKLIST_RANGE') {
             await supabase.from('bot_settings').update({ blacklisted_ranges: text.trim() }).eq('id', 1);
             await updateState(chatId, null);
-            return bot.sendMessage(chatId, `✅ <b>Blacklist Updated!</b>\nRanges: <code>${text}</code>`, { parse_mode: 'HTML', ...adminMenu });
+            return bot.sendMessage(chatId, `✅ <b>Blacklist Updated!</b>`, { parse_mode: 'HTML', ...adminMenu });
         }
         if (state === 'WAITING_SUB_ADMIN') {
             const parts = text.split(' ');
-            const tId = Number(parts[0]);
-            const action = parts[1]?.toLowerCase();
-            if(!tId || (action !== 'add' && action !== 'remove')) return bot.sendMessage(chatId, "⚠️ Format: <code>ID add</code> OR <code>ID remove</code>", { parse_mode: 'HTML' });
-            
-            await supabase.from('bot_users').update({ is_admin: action === 'add' }).eq('telegram_id', tId);
+            if(!parts[0] || (parts[1] !== 'add' && parts[1] !== 'remove')) return bot.sendMessage(chatId, "⚠️ Format: <code>ID add</code> OR <code>ID remove</code>", { parse_mode: 'HTML' });
+            await supabase.from('bot_users').update({ is_admin: parts[1] === 'add' }).eq('telegram_id', Number(parts[0]));
             await updateState(chatId, null);
-            return bot.sendMessage(chatId, `✅ <b>Sub-Admin access ${action === 'add' ? 'granted to' : 'removed from'} ${tId}</b>`, { parse_mode: 'HTML', ...adminMenu });
-        }
-        if (state === 'WAITING_USER_INFO') {
-            const tId = Number(text.trim());
-            const { data: tu } = await supabase.from('bot_users').select('*').eq('telegram_id', tId).single();
-            await updateState(chatId, null);
-            if(!tu) return bot.sendMessage(chatId, "❌ <b>User not found in DB.</b>", { parse_mode: 'HTML', ...adminMenu });
-            
-            const uInfo = `🔍 <b>User Information</b>\n━━━━━━━━━━━━━━━━━\n🆔 <b>ID:</b> <code>${tu.telegram_id}</code>\n📞 <b>Total Numbers:</b> ${tu.total_numbers}\n📩 <b>Total OTPs:</b> ${tu.total_otps}\n💾 <b>Saved Range:</b> ${tu.saved_range || 'None'}\n🚫 <b>Banned:</b> ${tu.is_banned ? 'Yes' : 'No'}\n👑 <b>Admin:</b> ${tu.is_admin ? 'Yes' : 'No'}`;
-            return bot.sendMessage(chatId, uInfo, { parse_mode: 'HTML', ...adminMenu });
+            return bot.sendMessage(chatId, `✅ <b>Sub-Admin list updated.</b>`, { parse_mode: 'HTML', ...adminMenu });
         }
         if (state === 'WAITING_BROADCAST') {
             await updateState(chatId, `CONFIRM_BCAST:${text}`);
             return bot.sendMessage(chatId, `📢 <b>Broadcast Preview:</b>\n\n${text}\n\n<i>Send this to all users?</i>`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '✅ Send Now', callback_data: 'run_bcast' }, { text: '❌ Cancel', callback_data: 'close' }]] } });
         }
-        if (state === 'WAITING_BAN_USER') {
-            const parts = text.split(' ');
-            const tId = Number(parts[0]);
-            const action = parts[1]?.toLowerCase();
-            if(!tId || (action !== 'ban' && action !== 'unban')) return bot.sendMessage(chatId, "⚠️ Format: <code>ID ban</code> OR <code>ID unban</code>", { parse_mode: 'HTML' });
-            
-            await supabase.from('bot_users').update({ is_banned: action === 'ban' }).eq('telegram_id', tId);
-            await updateState(chatId, null);
-            return bot.sendMessage(chatId, `✅ <b>User has been ${action}ned.</b>`, { parse_mode: 'HTML', ...adminMenu });
-        }
     }
 
     // ------------------------------------------------------------------------
-    // MAIN COMMANDS
+    // MAIN MENU COMMANDS
     // ------------------------------------------------------------------------
     if (text.startsWith('/start')) {
-        const wlcMsg = `👋 <b>Welcome to the Premium SMS Bot!</b>\n\n🤖 I am your advanced assistant for getting verification codes (OTP) quickly and securely.\n\nPlease use the beautiful menu below to navigate:`;
-        return bot.sendMessage(chatId, wlcMsg, { parse_mode: 'HTML', ...mainMenu });
+        return bot.sendMessage(chatId, `👋 <b>Welcome to the Premium SMS Bot!</b>\n\n🤖 I am your advanced assistant for getting verification codes (OTP) quickly and securely.`, { parse_mode: 'HTML', ...mainMenu });
     }
     
     if (text === '⚙️ Set Range') {
         const current = user.saved_range ? `<code>${user.saved_range}</code> (Active ✅)` : `<b>None</b> ❌`;
         await updateState(chatId, 'WAITING_RANGE');
-        return bot.sendMessage(chatId, `⚙️ <b>Range Configuration</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Current Range:</b> ${current}\n\n🔢 Please type the new Range ID you want to set (e.g. <code>26134</code>):`, { parse_mode: 'HTML', ...cancelMenu });
+        return bot.sendMessage(chatId, `⚙️ <b>Range Configuration</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Current Range:</b> ${current}\n\n🔢 Please type the new Range ID you want to set:`, { parse_mode: 'HTML', ...cancelMenu });
     }
 
     if (text === '🚀 Get Number') {
         if (!user.saved_range) {
             await updateState(chatId, 'WAITING_RANGE');
-            return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>\nPlease type the Range ID you want to use (e.g. <code>26134</code>):", { parse_mode: 'HTML', ...cancelMenu });
+            return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>\nPlease type the Range ID you want to use:", { parse_mode: 'HTML', ...cancelMenu });
         }
         return fetchNumberAction(chatId, user.saved_range, settings);
     }
@@ -240,7 +211,7 @@ async function processMessage(msg) {
                 consoleRes.data.data.hits.forEach(h => hitCounts[h.range] = (hitCounts[h.range] || 0) + 1);
             }
 
-            // FILTER: ONLY FB, WhatsApp, Telegram
+            // FILTER: ONLY FB, WA, TG
             const targetServices = ['fb', 'facebook', 'wa', 'whatsapp', 'tg', 'telegram'];
             const activeServices = accessRes.data.data.services.filter(s => 
                 targetServices.some(ts => s.sid.toLowerCase().includes(ts)) && s.ranges && s.ranges.length > 0
@@ -251,7 +222,7 @@ async function processMessage(msg) {
             if (activeServices.length === 0) {
                 trafficMsg += `❌ <b>No traffic currently available for FB, WhatsApp, or Telegram.</b>`; 
             } else {
-                activeServices.slice(0, 3).forEach(srv => {
+                activeServices.forEach(srv => {
                     let sName = srv.sid.toUpperCase();
                     if(sName.includes('FB')) sName = 'Facebook (FB)';
                     else if(sName.includes('WA')) sName = 'WhatsApp (WA)';
@@ -273,7 +244,7 @@ async function processMessage(msg) {
     }
 
     if (text === '🎧 Support') {
-        const supMsg = `👨‍💻 <b>Support Center</b>\n\nFor any technical assistance, API issues, or inquiries, please contact:\n👉 <b>@SiyamExclusive</b>`;
+        const supMsg = `👨‍💻 <b>Support Center</b>\n━━━━━━━━━━━━━━━━━\nFor any technical assistance, API issues, or inquiries, please contact:\n👉 <b>@SiyamExclusive</b>`;
         return bot.sendMessage(chatId, supMsg, { parse_mode: 'HTML' });
     }
 
@@ -282,61 +253,38 @@ async function processMessage(msg) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...adminMenu });
         
         if (text === '🌐 API Setup') {
-            const currentApi = (settings && settings.mauth_api) ? `<code>${settings.mauth_api.substring(0, 8)}...</code> (Active ✅)` : `<b>None</b> ❌`;
             await updateState(chatId, 'WAITING_API_KEY');
-            return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Current API:</b> ${currentApi}\n\n🔑 <b>Provide the new Master mauthapi Key:</b>`, { parse_mode: 'HTML', ...cancelMenu });
+            return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n🔑 Provide the new Master mauthapi Key:`, { parse_mode: 'HTML', ...cancelMenu });
         }
         if (text === '📡 API Status') {
             try {
                 const res = await axios.get(`${API_BASE_URL}/console`, { headers: { 'mauthapi': settings.mauth_api } });
                 if(res.data && res.data.meta && res.data.meta.code === 200) {
                     return bot.sendMessage(chatId, `📡 <b>API Status:</b> 🟢 ONLINE & ACTIVE`, { parse_mode: 'HTML' });
-                } else { throw new Error('Bad Code'); }
+                }
             } catch(e) {
                 return bot.sendMessage(chatId, `📡 <b>API Status:</b> 🔴 OFFLINE / INVALID KEY`, { parse_mode: 'HTML' });
             }
         }
         if (text === '⛔ Range Blacklist') {
-            const currBL = settings.blacklisted_ranges ? `<code>${settings.blacklisted_ranges}</code>` : 'None';
             await updateState(chatId, 'WAITING_BLACKLIST_RANGE');
-            return bot.sendMessage(chatId, `⛔ <b>Range Blacklist</b>\n━━━━━━━━━━━━━━━━━\n📌 <b>Currently Blocked:</b> ${currBL}\n\n📝 Send the ranges you want to block (comma separated, e.g., <code>1234, 5678</code>) or send <code>clear</code> to empty:`, { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '🛡️ Sub-Admin') {
-            await updateState(chatId, 'WAITING_SUB_ADMIN');
-            return bot.sendMessage(chatId, "🛡️ <b>Manage Sub-Admins</b>\n━━━━━━━━━━━━━━━━━\nSend format: <code>TelegramID add</code> OR <code>TelegramID remove</code>\nExample: <code>123456789 add</code>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '🔍 User Info') {
-            await updateState(chatId, 'WAITING_USER_INFO');
-            return bot.sendMessage(chatId, "🔍 <b>Search User</b>\nSend the Telegram ID to get their details:", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '📢 Broadcast') {
-            await updateState(chatId, 'WAITING_BROADCAST');
-            return bot.sendMessage(chatId, "📢 <b>Send broadcast message (HTML allowed):</b>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '🚫 Ban / Unban') {
-            await updateState(chatId, 'WAITING_BAN_USER');
-            return bot.sendMessage(chatId, "🚫 <b>Manage Access</b>\nSend format: <code>TelegramID ban</code> OR <code>TelegramID unban</code>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-        if (text === '🔴 Maintenance') {
-            const newStatus = !settings.maintenance_mode;
-            await supabase.from('bot_settings').update({ maintenance_mode: newStatus }).eq('id', 1);
-            return bot.sendMessage(chatId, `🔴 <b>Maintenance Mode is now:</b> ${newStatus ? 'ON 🔴' : 'OFF 🟢'}`, { parse_mode: 'HTML' });
+            return bot.sendMessage(chatId, `⛔ <b>Range Blacklist</b>\nSend the ranges to block (comma separated):`, { parse_mode: 'HTML', ...cancelMenu });
         }
         if (text === '📈 Global Stats') {
             const { data: users } = await supabase.from('bot_users').select('total_otps, total_numbers');
             let tOtp = 0, tNum = 0;
             users.forEach(u => { tOtp += u.total_otps; tNum += u.total_numbers; });
 
-            // Range breakdown
+            // Service & Range Stats
             const { data: activeDB } = await supabase.from('active_numbers').select('range_prefix').eq('status', 'COMPLETED');
             const rangeCounts = {};
             activeDB.forEach(a => { rangeCounts[a.range_prefix] = (rangeCounts[a.range_prefix] || 0) + 1; });
             
-            let statMsg = `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users.length}\n📞 <b>Total Numbers Taken:</b> ${tNum}\n📩 <b>Total OTPs Decoded:</b> ${tOtp}\n\n🔥 <b>Top Successful Ranges:</b>\n`;
+            let statMsg = `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users.length}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}\n\n🔥 <b>Top Successful Services/Ranges:</b>\n`;
             
             Object.entries(rangeCounts)
                 .sort((a,b) => b[1] - a[1])
-                .slice(0, 5) // Top 5
+                .slice(0, 7)
                 .forEach(([r, c]) => { statMsg += `  ⮑ <code>${r}</code>: ${c} OTPs\n`; });
 
             return bot.sendMessage(chatId, statMsg, { parse_mode: 'HTML' });
@@ -362,7 +310,7 @@ async function processCallback(query) {
 
     if (data.startsWith('copy_num_')) {
         const numToCopy = data.replace('copy_num_', '');
-        return bot.answerCallbackQuery(query.id, { text: `📱 Number: ${numToCopy}\n\nTip: You can tap the number in the message above to copy it!`, show_alert: true });
+        return bot.answerCallbackQuery(query.id, { text: `📱 Number: ${numToCopy}\nTap the number in the chat to copy!`, show_alert: true });
     }
 
     if (data.startsWith('req_num_')) {
@@ -371,12 +319,10 @@ async function processCallback(query) {
         return fetchNumberAction(chatId, range, settings);
     }
 
-    // 🚀 NEW BEAUTIFUL OTP FORMATTER
+    // 🚀 THE MAGIC: SEAMLESS OTP FETCHING & AUTO NEXT NUMBER
     if (data.startsWith('chk_otp_')) {
         const num = data.replace('chk_otp_', '');
         const cleanNum = num.replace('+', '').trim();
-        
-        const pMsg = await bot.sendMessage(chatId, `⏳ <b>Fetching OTP...</b>`, { parse_mode: 'HTML' });
         
         try {
             const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
@@ -387,45 +333,35 @@ async function processCallback(query) {
             if(res.data && res.data.data && res.data.data.otps) {
                 otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
             }
-            
-            await bot.deleteMessage(chatId, pMsg.message_id).catch(()=>{});
 
             if (otpFound) {
                 // Update DB
-                let { data: u } = await supabase.from('bot_users').select('total_otps').eq('telegram_id', chatId).single();
+                let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', chatId).single();
                 await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', chatId);
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
                 const cleanCode = extractOTP(otpFound.message || "");
 
-                // PERFECT DESIGN FORMAT AS REQUESTED
+                // PERFECT DESIGN FORMAT: Number & Code at the end of the line
                 const smsg = `✅ <b>OTP Received Successfully!</b>\n━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b>                <code>${num}</code>\n🔑 <b>Verification Code:</b>   <code>${cleanCode}</code>`;
                 
-                return bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+                // 1. Edit the current box into the OTP Success Message (Removes Buttons)
+                await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+
+                // 2. ⚡ SEAMLESS AUTO-FETCH NEXT NUMBER ⚡
+                // Automatically grabs a new number and pushes it directly below!
+                let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
+                let rangeToFetch = act ? act.range_prefix : u.saved_range;
+                
+                if(rangeToFetch) {
+                    await fetchNumberAction(chatId, rangeToFetch, settings);
+                }
+                return;
             } else {
                 return bot.answerCallbackQuery(query.id, { text: `⏳ OTP not received yet. Keep checking!`, show_alert: false });
             }
         } catch(e) {
-            await bot.deleteMessage(chatId, pMsg.message_id).catch(()=>{});
             return bot.answerCallbackQuery(query.id, { text: `❌ API Error while checking OTP.`, show_alert: true });
-        }
-    }
-
-    if (data === 'run_bcast') {
-        let { data: userState } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
-        if (userState && userState.current_state && userState.current_state.startsWith('CONFIRM_BCAST:')) {
-            const bMsg = userState.current_state.replace('CONFIRM_BCAST:', '');
-            await updateState(chatId, null);
-            await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-            
-            const { data: users } = await supabase.from('bot_users').select('telegram_id');
-            let s = 0, f = 0;
-            for (const u of users) {
-                try { await bot.sendMessage(u.telegram_id, bMsg, { parse_mode: 'HTML' }); s++; } 
-                catch(e){ f++; }
-                await new Promise(res => setTimeout(res, 40)); 
-            }
-            return bot.editMessageText(`📢 <b>Broadcast Completed!</b>\n✅ Delivered: ${s}\n❌ Failed: ${f}`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         }
     }
 }
