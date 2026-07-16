@@ -1,16 +1,17 @@
 {
-"name": "enterprise-sms-bot",
-"version": "4.0.0",
-"description": "Enterprise Telegram Bot for SMS, 2FA, and FB Bulk Checker",
-"main": "api/bot.js",
-"scripts": {
-"start": "node api/bot.js"
-},
-"dependencies": {
-"@supabase/supabase-js": "^2.39.3",
-"axios": "^1.6.7",
-"node-telegram-bot-api": "^0.66.0",
-"nodemailer": "^6.9.9",
-"otplib": "^12.0.1"
-}
+  "name": "enterprise-sms-bot",
+  "version": "4.0.0",
+  "description": "Enterprise Telegram Bot for SMS and FB Checker",
+  "main": "api/bot.js",
+  "scripts": {
+    "start": "node api/bot.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.3",
+    "axios": "^1.6.7",
+    "node-telegram-bot-api": "^0.66.0",
+    "telegraf": "^4.15.3",
+    "nodemailer": "^6.9.9",
+    "otplib": "^12.0.1"
+  }
 }
