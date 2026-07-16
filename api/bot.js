@@ -304,15 +304,16 @@ async function processMessage(msg) {
         
         if (text === '📡 API Management' && isSuperAdmin) {
             const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Checking API connection...</b>`, { parse_mode: 'HTML' });
-            let bal = "N/A", otps = "N/A", status = "🔴 OFFLINE / INVALID";
+            let bal = "Not Provided by API", status = "🔴 OFFLINE / INVALID";
             try {
                 const headers = { 'mauthapi': settings.mauth_api };
                 const res = await axios.get(`${API_BASE_URL}/console`, { headers });
                 if(res.data && res.data.meta && res.data.meta.code === 200) {
                     status = "🟢 ACTIVE";
-                    // Attempting to extract stats if API returns them
                     if (res.data.data) {
-                        bal = res.data.data.balance !== undefined ? `$${res.data.data.balance}` : "Hidden";
+                        // API তে ব্যালেন্স যে নামেই থাকুক না কেন, সেটি খোঁজার চেষ্টা করবে
+                        const b = res.data.data.balance ?? res.data.data.credit ?? res.data.data.credits ?? res.data.data.amount;
+                        bal = b !== undefined ? `$${b}` : "Not Shown Here";
                     }
                 }
             } catch(e) {}
