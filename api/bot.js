@@ -12,14 +12,13 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPER_ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : []; 
-const API_BASE_URL = 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 const cooldowns = new Map();
 
 // ============================================================================
-// 1.5 KEEP-ALIVE SERVER (For Render)
+// 1.5 KEEP-ALIVE SERVER
 // ============================================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -83,67 +82,11 @@ function checkSpam(chatId) {
     return false;
 }
 
-// ============================================================================
-// 🔥 4. PURE AUTO-OTP ENGINE (SILENT BACKGROUND CHECK)
-// ============================================================================
-setInterval(async () => {
-    try {
-        const { data: pendingNumbers } = await supabase.from('active_numbers').select('*').eq('status', 'PENDING');
-        if (!pendingNumbers || pendingNumbers.length === 0) return;
-
-        const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
-        if (!settings || !settings.mauth_api) return;
-
-        const headers = { 'mauthapi': settings.mauth_api };
-        const now = new Date();
-        const activePending = [];
-
-        // 1. Auto-Cancel Timeout (5 Mins)
-        for (const pending of pendingNumbers) {
-            const createdTime = new Date(pending.created_at);
-            const diffMins = (now - createdTime) / 60000;
-
-            if (diffMins >= 5.0) {
-                await supabase.from('active_numbers').update({ status: 'TIMEOUT' }).eq('id', pending.id);
-                bot.sendMessage(pending.telegram_id, `⏳ <b>Time Out!</b>\nNumber <code>${pending.full_number}</code> cancelled (No OTP within 5 mins).`, { parse_mode: 'HTML' }).catch(()=>{});
-            } else {
-                activePending.push(pending);
-            }
-        }
-
-        if (activePending.length === 0) return;
-
-        // 2. Fetch OTP from API
-        const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
-        
-        if (res.data && res.data.data && res.data.data.otps) {
-            for (const pending of activePending) {
-                const cleanNum = pending.full_number.replace('+', '').trim();
-                const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
-
-                if (otpFound) {
-                    await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
-                    
-                    let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
-                    await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
-
-                    const cleanCode = extractOTP(otpFound.message || "");
-                    const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
-                    
-                    await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
-                    
-                    // Auto-Fetch Next Number
-                    if (u.saved_range) fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
-                }
-            }
-        }
-    } catch (error) {}
-}, 8000); // 8 Seconds interval
-
-// 🚀 NUMBER FETCHER
+// 🚀 NUMBER FETCHER (MANUAL FETCH + 5 MIN TIMEOUT UI)
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     const cleanRange = range.replace(/x/gi, '').trim();
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.replace(/x/gi, '').trim());
+    const apiUrl = settings.api_base_url || 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
     
     if (blacklisted.includes(cleanRange)) {
         const blockMsg = `🚫 <b>Admin Blocked This Range!</b>\n━━━━━━━━━━━━━━━━━━━━\nএই রেঞ্জটি সাময়িকভাবে বন্ধ করা হয়েছে।`;
@@ -165,7 +108,7 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         if (!settings || !settings.mauth_api) return bot.editMessageText(`❌ <b>API Key is not configured!</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
 
         const headers = { 'mauthapi': settings.mauth_api };
-        const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
+        const res = await axios.post(`${apiUrl}/getnum`, { rid: range }, { headers });
         
         if (res.data && res.data.meta && res.data.meta.code !== 200) {
             return bot.editMessageText(`❌ <b>Out of Stock!</b>\nRange <code>${range}</code> currently has no numbers available.`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
@@ -177,14 +120,15 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically...</i>\n\n<i>(Tap the number above to copy it)</i>`;
+        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n<i>(Tap the number above to copy it)</i>`;
+        
         const kb = { inline_keyboard: [
             [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
-            [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${fullNum}` }]
+            [{ text: '📩 Fetch OTP', callback_data: `chk_otp_${fullNum}` }]
         ]};
         return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML', reply_markup: kb });
     } catch(e) {
-        return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
+        return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>\nPlease check if your API URL is correct.`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
     }
 }
 
@@ -199,6 +143,7 @@ bot.on('message', async (msg) => {
 
     const user = await getUser(chatId, firstName);
     const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
+    const apiUrl = settings.api_base_url || 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
     
     const isSuperAdmin = SUPER_ADMIN_IDS.includes(Number(chatId));
     const isSubAdmin = user.is_admin;
@@ -252,6 +197,11 @@ bot.on('message', async (msg) => {
             await supabase.from('bot_settings').update({ mauth_api: text.trim() }).eq('id', 1);
             await updateState(chatId, null);
             return bot.sendMessage(chatId, "✅ <b>API Key Updated!</b>", { parse_mode: 'HTML', ...currentAdminMenu });
+        }
+        if (state === 'WAITING_API_URL' && isSuperAdmin) {
+            await supabase.from('bot_settings').update({ api_base_url: text.trim() }).eq('id', 1);
+            await updateState(chatId, null);
+            return bot.sendMessage(chatId, "✅ <b>API Base URL Updated!</b>", { parse_mode: 'HTML', ...currentAdminMenu });
         }
         if (state === 'WAITING_BLACKLIST_RANGE' && isSuperAdmin) {
             const newBlacklist = text.trim().toLowerCase() === 'clear' ? '' : text.trim();
@@ -314,7 +264,7 @@ bot.on('message', async (msg) => {
         const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Analyzing Live Traffic...</b>`, { parse_mode: 'HTML' });
         try {
             const headers = { 'mauthapi': settings.mauth_api };
-            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${apiUrl}/liveaccess`, { headers }), axios.get(`${apiUrl}/console`, { headers }) ]);
             
             const hitCounts = {};
             if (consoleRes.data.data && consoleRes.data.data.hits) {
@@ -362,7 +312,7 @@ bot.on('message', async (msg) => {
             let bal = "Not Provided", status = "🔴 OFFLINE / INVALID";
             try {
                 const headers = { 'mauthapi': settings.mauth_api };
-                const res = await axios.get(`${API_BASE_URL}/console`, { headers });
+                const res = await axios.get(`${apiUrl}/console`, { headers });
                 if(res.data && res.data.meta && res.data.meta.code === 200) {
                     status = "🟢 ACTIVE";
                     if (res.data.data) {
@@ -375,8 +325,11 @@ bot.on('message', async (msg) => {
             const api = settings.mauth_api || "";
             const maskedApi = api.length > 8 ? `${api.substring(0, 4)}${'*'.repeat(12)}${api.substring(api.length - 4)}` : 'Not Set';
             
-            const msg = `📡 <b>API Control Center</b>\n━━━━━━━━━━━━━━━━━━━━\n⚡ <b>Status:</b> ${status}\n🔑 <b>API Key:</b> <code>${maskedApi}</code>\n💰 <b>Balance:</b> ${bal}`;
-            const kb = { inline_keyboard: [[{ text: '⚙️ Set New API Key', callback_data: 'set_api_btn' }]] };
+            const msg = `📡 <b>API Control Center</b>\n━━━━━━━━━━━━━━━━━━━━\n⚡ <b>Status:</b> ${status}\n🔑 <b>API Key:</b> <code>${maskedApi}</code>\n🔗 <b>API URL:</b> <code>${apiUrl}</code>\n💰 <b>Balance:</b> ${bal}`;
+            const kb = { inline_keyboard: [
+                [{ text: '🔑 Set New API Key', callback_data: 'set_api_btn' }],
+                [{ text: '🔗 Set New API URL', callback_data: 'set_api_url_btn' }]
+            ]};
             return bot.editMessageText(msg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: kb });
         }
 
@@ -454,7 +407,6 @@ bot.on('callback_query', async (query) => {
     
     if(data === 'close') return bot.deleteMessage(chatId, msgId).catch(()=>{});
 
-    // ALL INLINE BUTTONS RESTORED
     if (data === 'live_traffic') {
         await bot.editMessageText(`⏳ <b>Refreshing Live Traffic...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         bot.emit('message', { chat: { id: chatId }, from: query.from, text: '🚦 Traffic' });
@@ -463,7 +415,12 @@ bot.on('callback_query', async (query) => {
 
     if (data === 'set_api_btn') {
         await updateState(chatId, 'WAITING_API_KEY');
-        return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n🔑 Provide the new Master mauthapi Key:`, { parse_mode: 'HTML', ...cancelMenu });
+        return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n🔑 Provide the new Master API Key:`, { parse_mode: 'HTML', ...cancelMenu });
+    }
+    
+    if (data === 'set_api_url_btn') {
+        await updateState(chatId, 'WAITING_API_URL');
+        return bot.sendMessage(chatId, `🔗 <b>API URL Configuration</b>\nProvide the new API Base URL\n(e.g., <code>https://api.voltxsms.com/MXS.../@public/api</code>):`, { parse_mode: 'HTML', ...cancelMenu });
     }
     
     if (data === 'manage_sub_admin') {
@@ -507,13 +464,24 @@ bot.on('callback_query', async (query) => {
         const cleanNum = num.replace('+', '').trim();
         
         try {
-            let { data: actStatus } = await supabase.from('active_numbers').select('status').eq('telegram_id', chatId).eq('full_number', num).single();
+            let { data: actStatus } = await supabase.from('active_numbers').select('status, created_at').eq('telegram_id', chatId).eq('full_number', num).single();
             if (actStatus && actStatus.status === 'COMPLETED') {
                  return bot.answerCallbackQuery(query.id, { text: `✅ OTP already processed!`, show_alert: true });
             }
+            
+            // Check 5 Mins Timeout manually
+            if (actStatus) {
+                const diffMins = (new Date() - new Date(actStatus.created_at)) / 60000;
+                if (diffMins >= 5.0) {
+                    await supabase.from('active_numbers').update({ status: 'TIMEOUT' }).eq('telegram_id', chatId).eq('full_number', num);
+                    return bot.answerCallbackQuery(query.id, { text: `⏳ Time Out! This number expired after 5 minutes.`, show_alert: true });
+                }
+            }
 
-            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
-            const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers: { 'mauthapi': settings.mauth_api } });
+            const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
+            const apiUrl = settings.api_base_url || 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
+            const res = await axios.get(`${apiUrl}/success-otp`, { headers: { 'mauthapi': settings.mauth_api } });
+            
             let otpFound = null;
             if(res.data && res.data.data && res.data.data.otps) {
                 otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
@@ -525,7 +493,7 @@ bot.on('callback_query', async (query) => {
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
                 const cleanCode = extractOTP(otpFound.message || "");
-                const smsg = `✅ <b>OTP Received! (Manual)</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
+                const smsg = `✅ <b>OTP Received!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
                 await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
                 
                 let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
@@ -536,7 +504,7 @@ bot.on('callback_query', async (query) => {
                 return bot.answerCallbackQuery(query.id, { text: `⏳ Not received yet. Wait...`, show_alert: true });
             }
         } catch(e) {
-            return bot.answerCallbackQuery(query.id, { text: `❌ API Error.`, show_alert: true });
+            return bot.answerCallbackQuery(query.id, { text: `❌ API Error. Check your API URL and Key.`, show_alert: true });
         }
     }
 });
