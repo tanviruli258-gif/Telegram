@@ -20,12 +20,15 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 // 2. PROFESSIONAL MENUS & UI
 // ============================================================================
 const getMainMenu = (isSuperAdmin, isSubAdmin) => {
-    const kb = [['🚀 Get Number', '⚙️ Set Range'], ['🚦 Traffic', '🔐 2FA'], ['🎧 Support']];
+    const kb = [
+        ['🚀 Get Number', '⚙️ Set Range'], 
+        ['🚦 Traffic', '🔐 2FA'], 
+        ['🌐 IP Checker', '🎧 Support'] // নতুন IP Checker বাটন যুক্ত করা হলো
+    ];
     if (isSuperAdmin || isSubAdmin) kb.push(['👑 Admin Panel']);
     return { reply_markup: { keyboard: kb, resize_keyboard: true } };
 };
 
-// Super Admin gets everything, Sub Admin gets restricted view
 const getAdminMenu = (isSuperAdmin) => {
     if (isSuperAdmin) {
         return { reply_markup: { keyboard: [
@@ -65,7 +68,7 @@ function extractOTP(message) {
     return match ? match[0] : message;
 }
 
-// 🚀 FAST NUMBER FETCHER (Replaces content in the SAME message)
+// 🚀 FAST NUMBER FETCHER
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.trim().toUpperCase());
     if (blacklisted.includes(range.toUpperCase())) {
@@ -132,9 +135,7 @@ async function processMessage(msg) {
     const mainMenu = getMainMenu(isSuperAdmin, isSubAdmin);
     const currentAdminMenu = getAdminMenu(isSuperAdmin);
 
-    // ------------------------------------------------------------------------
-    // HIDDEN BAN/UNBAN COMMAND (Only for Admins)
-    // ------------------------------------------------------------------------
+    // HIDDEN BAN/UNBAN COMMAND
     if (isAdmin && /^\d+ (ban|unban)$/i.test(text.trim())) {
         const parts = text.trim().toLowerCase().split(' ');
         const targetId = Number(parts[0]);
@@ -149,14 +150,13 @@ async function processMessage(msg) {
     }
 
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are permanently banned from using this bot.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    
-    if (settings.maintenance_mode && !isAdmin) {
-        return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>\n\n💬 <i>${settings.maintenance_msg || 'System Update in Progress!'}</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    }
+    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>\n\n💬 <i>${settings.maintenance_msg || 'System Update in Progress!'}</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
     const state = user.current_state;
 
-    // USER STATES
+    // ------------------------------------------------------------------------
+    // USER INPUT STATES
+    // ------------------------------------------------------------------------
     if (state === 'WAITING_RANGE') {
         const range = text.trim().toUpperCase().replace(/X/g, '');
         if(isNaN(range)) return bot.sendMessage(chatId, "⚠️ <b>Invalid range! Please send numbers only.</b>", { parse_mode: 'HTML' });
@@ -174,6 +174,45 @@ async function processMessage(msg) {
             return bot.sendMessage(chatId, `✅ <b>2FA Token Generated!</b>\n━━━━━━━━━━━━━━━━━\n🔑 <b>Secret:</b> <code>${cleanSecret}</code>\n💬 <b>Code:</b> <code>${token}</code>`, { parse_mode: 'HTML', ...mainMenu });
         } catch (e) {
             return bot.sendMessage(chatId, "❌ <b>Invalid Secret Key format.</b>", { parse_mode: 'HTML', ...mainMenu });
+        }
+    }
+
+    // 🌐 NEW: IP CHECKER STATE
+    if (state === 'WAITING_IP_ADDRESS') {
+        const ip = text.trim();
+        // Basic IPv4 Validation
+        if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+            return bot.sendMessage(chatId, "⚠️ <b>Invalid Format!</b>\nPlease send a valid IPv4 address (e.g., 192.168.1.1):", { parse_mode: 'HTML', ...cancelMenu });
+        }
+        
+        await updateState(chatId, null);
+        const statusMsg = await bot.sendMessage(chatId, `🔍 <b>Scanning IP:</b> <code>${ip}</code>...`, { parse_mode: 'HTML' });
+        
+        try {
+            // Using a free IP info API that detects Hosting/Proxies
+            const res = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city,isp,proxy,hosting,query`);
+            
+            if (res.data.status !== 'success') throw new Error('Failed');
+
+            const { country, city, isp, proxy, hosting } = res.data;
+            const isBad = proxy || hosting;
+            const riskLevel = isBad ? '🔴 <b>HIGH RISK</b> (Proxy/Datacenter)' : '🟢 <b>SAFE</b> (Residential/Mobile)';
+
+            const infoMsg = `🌐 <b>IP Security Audit Report</b>
+━━━━━━━━━━━━━━━━━━━━
+📍 <b>IP Address:</b> <code>${ip}</code>
+🌍 <b>Location:</b> ${city}, ${country}
+🏢 <b>ISP:</b> ${isp}
+
+🛡️ <b>Security Analysis:</b>
+🕵️‍♂️ <b>Proxy/VPN:</b> ${proxy ? 'Yes 🔴' : 'No 🟢'}
+☁️ <b>Datacenter/Hosting:</b> ${hosting ? 'Yes 🔴' : 'No 🟢'}
+
+📊 <b>Status:</b> ${riskLevel}`;
+
+            return bot.editMessageText(infoMsg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
+        } catch (e) {
+            return bot.editMessageText(`❌ <b>Failed to scan IP. Please try again later.</b>`, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
         }
     }
 
@@ -200,10 +239,7 @@ async function processMessage(msg) {
             await updateState(chatId, null);
             
             bot.sendMessage(chatId, `✅ <b>Sub-Admin list updated.</b>`, { parse_mode: 'HTML', ...currentAdminMenu });
-            
-            if (isAdding) {
-                bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b> of this bot.\n\nPlease click /start to load your new Admin Panel.`, { parse_mode: 'HTML' }).catch(()=>{});
-            }
+            if (isAdding) bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b> of this bot.\n\nPlease click /start to load your new Admin Panel.`, { parse_mode: 'HTML' }).catch(()=>{});
             return;
         }
         if (state === 'WAITING_USER_INFO') {
@@ -250,6 +286,12 @@ async function processMessage(msg) {
     if (text === '🔐 2FA') {
         await updateState(chatId, 'WAITING_2FA_SECRET');
         return bot.sendMessage(chatId, "🔐 <b>2FA Authenticator</b>\n━━━━━━━━━━━━━━━━━\nSend your Secret Key to generate a token:", { parse_mode: 'HTML', ...cancelMenu });
+    }
+
+    // 🌐 NEW: TRIGGER IP CHECKER
+    if (text === '🌐 IP Checker') {
+        await updateState(chatId, 'WAITING_IP_ADDRESS');
+        return bot.sendMessage(chatId, "🌐 <b>IP Security Checker</b>\n━━━━━━━━━━━━━━━━━━━━\nSend the IP address you want to scan (e.g., <code>192.168.1.1</code>):", { parse_mode: 'HTML', ...cancelMenu });
     }
 
     if (text === '🚦 Traffic') {
@@ -311,7 +353,6 @@ async function processMessage(msg) {
                 if(res.data && res.data.meta && res.data.meta.code === 200) {
                     status = "🟢 ACTIVE";
                     if (res.data.data) {
-                        // API তে ব্যালেন্স যে নামেই থাকুক না কেন, সেটি খোঁজার চেষ্টা করবে
                         const b = res.data.data.balance ?? res.data.data.credit ?? res.data.data.credits ?? res.data.data.amount;
                         bal = b !== undefined ? `$${b}` : "Not Shown Here";
                     }
@@ -354,26 +395,14 @@ async function processMessage(msg) {
         if (text === '📈 Global Stats') {
             const { data: users } = await supabase.from('bot_users').select('total_otps, total_numbers');
             let tOtp = 0, tNum = 0;
-            if (users) {
-                users.forEach(u => { 
-                    tOtp += (u.total_otps || 0); 
-                    tNum += (u.total_numbers || 0); 
-                });
-            }
+            if (users) { users.forEach(u => { tOtp += (u.total_otps || 0); tNum += (u.total_numbers || 0); }); }
 
             const { data: activeDB } = await supabase.from('active_numbers').select('range_prefix').eq('status', 'COMPLETED');
             const rangeCounts = {};
-            if (activeDB) {
-                activeDB.forEach(a => { rangeCounts[a.range_prefix] = (rangeCounts[a.range_prefix] || 0) + 1; });
-            }
+            if (activeDB) { activeDB.forEach(a => { rangeCounts[a.range_prefix] = (rangeCounts[a.range_prefix] || 0) + 1; }); }
             
             let statMsg = `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users ? users.length : 0}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}\n\n🔥 <b>Top Successful Ranges:</b>\n`;
-            
-            Object.entries(rangeCounts)
-                .sort((a,b) => b[1] - a[1])
-                .slice(0, 7)
-                .forEach(([r, c]) => { statMsg += `  ⮑ <code>${r}</code>: ${c} OTPs\n`; });
-
+            Object.entries(rangeCounts).sort((a,b) => b[1] - a[1]).slice(0, 7).forEach(([r, c]) => { statMsg += `  ⮑ <code>${r}</code>: ${c} OTPs\n`; });
             return bot.sendMessage(chatId, statMsg, { parse_mode: 'HTML' });
         }
     }
@@ -400,14 +429,12 @@ async function processCallback(query) {
         return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n🔑 Provide the new Master mauthapi Key:`, { parse_mode: 'HTML', ...cancelMenu });
     }
 
-    // 🚀 SEAMLESS NUMBER CHANGE (Edits the SAME message ID)
     if (data.startsWith('req_num_')) {
         const range = data.replace('req_num_', '');
         const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
         return fetchNumberAction(chatId, range, settings, msgId);
     }
 
-    // 🚀 OTP MATCHER & PERFECT FORMATTING
     if (data.startsWith('chk_otp_')) {
         const num = data.replace('chk_otp_', '');
         const cleanNum = num.replace('+', '').trim();
@@ -428,20 +455,13 @@ async function processCallback(query) {
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
                 const cleanCode = extractOTP(otpFound.message || "");
-
-                // PERFECT DESIGN FORMAT: Line breaks between Number and Code
                 const smsg = `✅ <b>OTP Received Successfully!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n\n🔑 <b>Verification Code:</b> <code>${cleanCode}</code>`;
-                
-                // Edit Current Box
                 await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
 
-                // Auto-Fetch Next Number Below (Lightning Fast Workflow)
                 let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
                 let rangeToFetch = act ? act.range_prefix : u.saved_range;
                 
-                if(rangeToFetch) {
-                    await fetchNumberAction(chatId, rangeToFetch, settings, null);
-                }
+                if(rangeToFetch) await fetchNumberAction(chatId, rangeToFetch, settings, null);
                 return;
             } else {
                 return bot.answerCallbackQuery(query.id, { text: `⏳ OTP not received yet. Keep checking!`, show_alert: false });
