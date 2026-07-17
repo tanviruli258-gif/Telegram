@@ -3,6 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const { authenticator } = require('otplib');
+const express = require('express'); // 🚀 Keep-Alive এর জন্য
 
 // ============================================================================
 // 1. SYSTEM CONFIGURATIONS
@@ -13,11 +14,27 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPER_ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : []; 
 const API_BASE_URL = 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
 
-const bot = new TelegramBot(BOT_TOKEN);
+// Render এ Long Polling ব্যবহার করা হলো (Webhook নয়)
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
 // ============================================================================
-// 2. PROFESSIONAL MENUS & UI (STRUCTURED LIKE THE SCREENSHOT)
+// 1.5 KEEP-ALIVE SERVER (Uptime/Cronjob এর জন্য ১০০% নিরাপদ)
+// ============================================================================
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// UptimeRobot বা Cron-job শুধু এই লিংকে হিট করবে, বটের মেসেজে কোনো প্রভাব পড়বে না
+app.get('/', (req, res) => {
+    res.status(200).send('Bot is running and awake! 🚀');
+});
+
+app.listen(PORT, () => {
+    console.log(`Keep-alive server is running on port ${PORT}`);
+});
+
+// ============================================================================
+// 2. PROFESSIONAL MENUS & UI
 // ============================================================================
 const getMainMenu = (isSuperAdmin, isSubAdmin) => {
     const kb = [
@@ -70,9 +87,54 @@ function extractOTP(message) {
     return match ? match[0] : message;
 }
 
-// 🚀 FAST NUMBER FETCHER & BLOCK LOGIC
+// ============================================================================
+// 🔥 4. AUTO OTP POLLING ENGINE (The Magic)
+// ============================================================================
+// প্রতি ৬ সেকেন্ড পর পর চেক করবে, শুধু পেন্ডিং নাম্বারগুলোর জন্য
+setInterval(async () => {
+    try {
+        const { data: pendingNumbers } = await supabase.from('active_numbers').select('*').eq('status', 'PENDING');
+        
+        if (pendingNumbers && pendingNumbers.length > 0) {
+            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
+            if (!settings || !settings.mauth_api) return;
+
+            const headers = { 'mauthapi': settings.mauth_api };
+            const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
+            
+            if (res.data && res.data.data && res.data.data.otps) {
+                for (const pending of pendingNumbers) {
+                    const cleanNum = pending.full_number.replace('+', '').trim();
+                    const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+
+                    if (otpFound) {
+                        // 1. ডাটাবেজ আপডেট (যাতে একই মেসেজ ২ বার না যায়)
+                        await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
+                        
+                        let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
+                        await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
+
+                        const cleanCode = extractOTP(otpFound.message || "");
+                        
+                        // 2. অটোমেটিক OTP মেসেজ সেন্ড
+                        const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n\n🔑 <b>Verification Code:</b>\n👉 <code>${cleanCode}</code> 👈`;
+                        await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
+
+                        // 3. ⚡ SEAMLESS AUTO-FETCH NEXT NUMBER ⚡
+                        if (u.saved_range) {
+                            fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        // Silent catch for background process
+    }
+}, 6000);
+
+// 🚀 NUMBER FETCHER (Modified for Auto-OTP)
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
-    // 🛡️ STRONG BLOCK LOGIC
     const cleanRange = range.replace(/x/gi, '').trim();
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.replace(/x/gi, '').trim());
     
@@ -93,9 +155,7 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     }
 
     try {
-        if (!settings || !settings.mauth_api) {
-            return bot.editMessageText(`❌ <b>API Key is not configured!</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
-        }
+        if (!settings || !settings.mauth_api) return bot.editMessageText(`❌ <b>API Key is not configured!</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
 
         const headers = { 'mauthapi': settings.mauth_api };
         const res = await axios.post(`${API_BASE_URL}/getnum`, { rid: range }, { headers });
@@ -110,12 +170,9 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n⏳ Checking for OTP in real-time...\n\n<i>(Tap the number above to copy it instantly)</i>`;
+        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically... (Do not click anything)</i>\n\n<i>(Tap the number above to copy it instantly)</i>`;
         
-        const kb = { inline_keyboard: [
-            [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
-            [{ text: '📩 Fetch OTP', callback_data: `chk_otp_${fullNum}` }]
-        ]};
+        const kb = { inline_keyboard: [[{ text: '🔄 Change Number', callback_data: `req_num_${range}` }]] };
         return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML', reply_markup: kb });
     } catch(e) {
         return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
@@ -123,9 +180,9 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
 }
 
 // ============================================================================
-// 4. MAIN MESSAGE PROCESSOR
+// 5. MAIN MESSAGE PROCESSOR (Polling)
 // ============================================================================
-async function processMessage(msg) {
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text || '';
     const firstName = msg.from.first_name || 'User';
@@ -177,7 +234,7 @@ async function processMessage(msg) {
         try {
             const cleanSecret = text.replace(/\s+/g, '').toUpperCase();
             const token = authenticator.generate(cleanSecret);
-            return bot.sendMessage(chatId, `✅ <b>2FA Token Generated!</b>\n━━━━━━━━━━━━━━━━━\n🔑 <b>Secret:</b> <code>${cleanSecret}</code>\n💬 <b>Code:</b> <code>${token}</code>`, { parse_mode: 'HTML', ...mainMenu });
+            return bot.sendMessage(chatId, `✅ <b>2FA Token Generated!</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 <b>Secret:</b> <code>${cleanSecret}</code>\n💬 <b>Code:</b> <code>${token}</code>`, { parse_mode: 'HTML', ...mainMenu });
         } catch (e) {
             return bot.sendMessage(chatId, "❌ <b>Invalid Secret Key format.</b>", { parse_mode: 'HTML', ...mainMenu });
         }
@@ -206,7 +263,7 @@ async function processMessage(msg) {
             await updateState(chatId, null);
             
             bot.sendMessage(chatId, `✅ <b>Sub-Admin access updated.</b>`, { parse_mode: 'HTML', ...currentAdminMenu });
-            if (isAdding) bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b> of this bot.\n\nPlease click /start to load your new Admin Panel.`, { parse_mode: 'HTML' }).catch(()=>{});
+            if (isAdding) bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b> of this bot.`, { parse_mode: 'HTML' }).catch(()=>{});
             return;
         }
         if (state === 'WAITING_TRACK_NUMBER') {
@@ -383,9 +440,7 @@ async function processMessage(msg) {
                 }); 
             }
 
-            // Top 3 Users Leaderboard
             leaderBoard.sort((a,b) => b.total_otps - a.total_otps);
-            
             let statMsg = `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users ? users.length : 0}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}\n\n🏆 <b>Top Users Leaderboard:</b>\n`;
             
             leaderBoard.slice(0, 3).forEach((u, i) => { 
@@ -397,12 +452,12 @@ async function processMessage(msg) {
             return bot.sendMessage(chatId, statMsg, { parse_mode: 'HTML', reply_markup: kb });
         }
     }
-}
+});
 
 // ============================================================================
-// 5. CALLBACK PROCESSOR (Inline Buttons)
+// 6. CALLBACK PROCESSOR (Inline Buttons)
 // ============================================================================
-async function processCallback(query) {
+bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const msgId = query.message.message_id;
     const data = query.data;
@@ -411,7 +466,7 @@ async function processCallback(query) {
 
     if (data === 'live_traffic') {
         await bot.editMessageText(`⏳ <b>Refreshing Live Traffic...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-        await processMessage({ chat: { id: chatId }, from: query.from, text: '🚦 Traffic' });
+        bot.emit('message', { chat: { id: chatId }, from: query.from, text: '🚦 Traffic' });
         return bot.deleteMessage(chatId, msgId).catch(()=>{});
     }
 
@@ -426,7 +481,6 @@ async function processCallback(query) {
     }
 
     if (data === 'clean_db') {
-        // Safe Cleaning: Only clears stuck current_states. Does not touch admins, bans, or balances.
         await supabase.from('bot_users').update({ current_state: null }).neq('current_state', null);
         return bot.answerCallbackQuery(query.id, { text: `✅ Junk Data Cleared Successfully!\nBot speed optimized.`, show_alert: true });
     }
@@ -435,42 +489,6 @@ async function processCallback(query) {
         const range = data.replace('req_num_', '');
         const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
         return fetchNumberAction(chatId, range, settings, msgId);
-    }
-
-    if (data.startsWith('chk_otp_')) {
-        const num = data.replace('chk_otp_', '');
-        const cleanNum = num.replace('+', '').trim();
-        
-        try {
-            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
-            const headers = { 'mauthapi': settings.mauth_api };
-
-            const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
-            let otpFound = null;
-            if(res.data && res.data.data && res.data.data.otps) {
-                otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
-            }
-
-            if (otpFound) {
-                let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', chatId).single();
-                await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', chatId);
-                await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
-
-                const cleanCode = extractOTP(otpFound.message || "");
-                const smsg = `✅ <b>OTP Received Successfully!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n\n🔑 <b>Verification Code:</b> <code>${cleanCode}</code>`;
-                await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
-
-                let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
-                let rangeToFetch = act ? act.range_prefix : u.saved_range;
-                
-                if(rangeToFetch) await fetchNumberAction(chatId, rangeToFetch, settings, null);
-                return;
-            } else {
-                return bot.answerCallbackQuery(query.id, { text: `⏳ OTP not received yet. Keep checking!`, show_alert: false });
-            }
-        } catch(e) {
-            return bot.answerCallbackQuery(query.id, { text: `❌ API Error while checking OTP.`, show_alert: true });
-        }
     }
 
     if (data === 'run_bcast') {
@@ -490,20 +508,4 @@ async function processCallback(query) {
             return bot.editMessageText(`📢 <b>Broadcast Completed!</b>\n✅ Delivered: ${s}\n❌ Failed: ${f}`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
         }
     }
-}
-
-// ============================================================================
-// 6. SERVERLESS HTTP HANDLER
-// ============================================================================
-module.exports = async (req, res) => {
-    if (req.method === 'POST') {
-        try {
-            const update = req.body;
-            if (update.message) await processMessage(update.message);
-            else if (update.callback_query) await processCallback(update.callback_query);
-        } catch (error) { 
-            console.error("System Error:", error.message); 
-        }
-    }
-    res.status(200).send('OK');
-};
+});
