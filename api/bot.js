@@ -19,7 +19,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 const cooldowns = new Map();
 
 // ============================================================================
-// 1.5 KEEP-ALIVE SERVER (For Render & UptimeRobot)
+// 1.5 KEEP-ALIVE SERVER (For Render)
 // ============================================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -130,7 +130,6 @@ setInterval(async () => {
                     const cleanCode = extractOTP(otpFound.message || "");
                     const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
                     
-                    // Send directly to user
                     await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
                     
                     // Auto-Fetch Next Number
@@ -138,9 +137,7 @@ setInterval(async () => {
                 }
             }
         }
-    } catch (error) {
-        // Catch silently so server never crashes
-    }
+    } catch (error) {}
 }, 8000); // 8 Seconds interval
 
 // 🚀 NUMBER FETCHER
@@ -180,9 +177,7 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        // STATIC STATIC STATIC - No Animation
         const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically...</i>\n\n<i>(Tap the number above to copy it)</i>`;
-        
         const kb = { inline_keyboard: [
             [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
             [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${fullNum}` }]
@@ -212,6 +207,7 @@ bot.on('message', async (msg) => {
     const mainMenu = getMainMenu(isSuperAdmin, isSubAdmin);
     const currentAdminMenu = getAdminMenu(isSuperAdmin);
 
+    // HIDDEN BAN/UNBAN
     if (isAdmin && /^\d+ (ban|unban)$/i.test(text.trim())) {
         const parts = text.trim().toLowerCase().split(' ');
         const targetId = Number(parts[0]);
@@ -226,10 +222,11 @@ bot.on('message', async (msg) => {
     }
 
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are permanently banned.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
+    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>\n\n💬 <i>${settings.maintenance_msg}</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
     const state = user.current_state;
 
+    // STATES
     if (state === 'WAITING_RANGE') {
         const range = text.trim().toUpperCase().replace(/X/g, '');
         if(isNaN(range)) return bot.sendMessage(chatId, "⚠️ <b>Invalid range!</b>", { parse_mode: 'HTML' });
@@ -290,6 +287,7 @@ bot.on('message', async (msg) => {
         }
     }
 
+    // MAIN COMMANDS
     if (text.startsWith('/start')) return bot.sendMessage(chatId, `👋 <b>Welcome to the Premium SMS Bot!</b>`, { parse_mode: 'HTML', ...mainMenu });
     
     if (text === '⚙️ Set Range') {
@@ -303,7 +301,6 @@ bot.on('message', async (msg) => {
             await updateState(chatId, 'WAITING_RANGE');
             return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>", { parse_mode: 'HTML', ...cancelMenu });
         }
-        // Auto-Cancel previous active pending before fetching new
         await supabase.from('active_numbers').update({ status: 'CANCELLED' }).eq('telegram_id', chatId).eq('status', 'PENDING');
         return fetchNumberAction(chatId, user.saved_range, settings, null);
     }
@@ -312,26 +309,104 @@ bot.on('message', async (msg) => {
         await updateState(chatId, 'WAITING_2FA_SECRET');
         return bot.sendMessage(chatId, "🔐 <b>2FA Authenticator</b>\nSend Secret Key:", { parse_mode: 'HTML', ...cancelMenu });
     }
-    if (text === '🚦 Traffic') return bot.sendMessage(chatId, `⏳ <b>Traffic feature available in previous config.</b>`, { parse_mode: 'HTML' });
+    
+    if (text === '🚦 Traffic') {
+        const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Analyzing Live Traffic...</b>`, { parse_mode: 'HTML' });
+        try {
+            const headers = { 'mauthapi': settings.mauth_api };
+            const [accessRes, consoleRes] = await Promise.all([ axios.get(`${API_BASE_URL}/liveaccess`, { headers }), axios.get(`${API_BASE_URL}/console`, { headers }) ]);
+            
+            const hitCounts = {};
+            if (consoleRes.data.data && consoleRes.data.data.hits) {
+                consoleRes.data.data.hits.forEach(h => hitCounts[h.range] = (hitCounts[h.range] || 0) + 1);
+            }
+
+            const targetServices = ['fb', 'facebook', 'wa', 'whatsapp', 'tg', 'telegram'];
+            const activeServices = accessRes.data.data.services.filter(s => 
+                targetServices.some(ts => s.sid.toLowerCase().includes(ts)) && s.ranges && s.ranges.length > 0
+            );
+
+            let trafficMsg = `🚦 <b>Live Network Traffic</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+            if (activeServices.length === 0) {
+                trafficMsg += `❌ <b>No traffic currently available.</b>`; 
+            } else {
+                activeServices.forEach(srv => {
+                    let sName = srv.sid.toUpperCase();
+                    if(sName.includes('FB')) sName = 'Facebook (FB)';
+                    else if(sName.includes('WA')) sName = 'WhatsApp (WA)';
+                    else if(sName.includes('TG')) sName = 'Telegram (TG)';
+                    
+                    trafficMsg += `🔷 <b>${sName}</b>\n`;
+                    srv.ranges.slice(0, 6).forEach(r => {
+                        const hits = hitCounts[r] || 0;
+                        let s = hits >= 4 ? '🟢 High' : (hits >= 2 ? '🟡 Med' : '🔴 Low');
+                        trafficMsg += `  🔸 <code>${r}</code> (${s})\n`;
+                    });
+                    trafficMsg += '\n';
+                });
+            }
+            return bot.editMessageText(trafficMsg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh Data', callback_data: 'live_traffic' }], [{ text: '🛑 Close', callback_data: 'close' }]] } });
+        } catch(e) {
+            return bot.editMessageText(`❌ <b>Failed to fetch live stats.</b>`, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
+        }
+    }
+
     if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support:</b> 👉 <b>@SiyamExclusive</b>`, { parse_mode: 'HTML' });
     
-    // ADMIN UI
+    // ADMIN UI RESTORED FULLY
     if (isAdmin) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...currentAdminMenu });
-        if (text === '📡 API Control' && isSuperAdmin) return bot.sendMessage(chatId, `API settings available via Inline buttons.`, { parse_mode: 'HTML' });
-        if (text === '⛔ Block Range' && isSuperAdmin) {
-            await updateState(chatId, 'WAITING_BLACKLIST_RANGE');
-            return bot.sendMessage(chatId, `⛔ <b>Range Blacklist</b>\n📝 Send ranges to block:`, { parse_mode: 'HTML', ...cancelMenu });
+        
+        if (text === '📡 API Control' && isSuperAdmin) {
+            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Checking API connection...</b>`, { parse_mode: 'HTML' });
+            let bal = "Not Provided", status = "🔴 OFFLINE / INVALID";
+            try {
+                const headers = { 'mauthapi': settings.mauth_api };
+                const res = await axios.get(`${API_BASE_URL}/console`, { headers });
+                if(res.data && res.data.meta && res.data.meta.code === 200) {
+                    status = "🟢 ACTIVE";
+                    if (res.data.data) {
+                        const b = res.data.data.balance ?? res.data.data.credit ?? res.data.data.amount;
+                        bal = b !== undefined ? `$${b}` : "Hidden";
+                    }
+                }
+            } catch(e) {}
+            
+            const api = settings.mauth_api || "";
+            const maskedApi = api.length > 8 ? `${api.substring(0, 4)}${'*'.repeat(12)}${api.substring(api.length - 4)}` : 'Not Set';
+            
+            const msg = `📡 <b>API Control Center</b>\n━━━━━━━━━━━━━━━━━━━━\n⚡ <b>Status:</b> ${status}\n🔑 <b>API Key:</b> <code>${maskedApi}</code>\n💰 <b>Balance:</b> ${bal}`;
+            const kb = { inline_keyboard: [[{ text: '⚙️ Set New API Key', callback_data: 'set_api_btn' }]] };
+            return bot.editMessageText(msg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: kb });
         }
-        if (text === '🛡️ Sub-Admin List' && isSuperAdmin) return bot.sendMessage(chatId, `Click below to manage:`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '⚙️ Manage Sub-Admins', callback_data: 'manage_sub_admin' }]] } });
+
+        if (text === '⛔ Block Range' && isSuperAdmin) {
+            const currBL = settings.blacklisted_ranges ? `<code>${settings.blacklisted_ranges}</code>` : 'None';
+            await updateState(chatId, 'WAITING_BLACKLIST_RANGE');
+            return bot.sendMessage(chatId, `⛔ <b>Range Blacklist</b>\n📌 <b>Current:</b> ${currBL}\n📝 Send ranges to block:`, { parse_mode: 'HTML', ...cancelMenu });
+        }
+
+        if (text === '🛡️ Sub-Admin List' && isSuperAdmin) {
+            const { data: subAdmins } = await supabase.from('bot_users').select('telegram_id, first_name').eq('is_admin', true);
+            let msg = `🛡️ <b>Sub-Admin Directory</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+            if (!subAdmins || subAdmins.length === 0) msg += `<i>No Sub-Admins assigned yet.</i>\n`;
+            else {
+                subAdmins.forEach(sa => { msg += `👤 <b>Name:</b> ${sa.first_name}\n🆔 <b>ID:</b> <code>${sa.telegram_id}</code>\n\n`; });
+            }
+            msg += `\n<i>To add/remove, click the button below:</i>`;
+            return bot.sendMessage(chatId, msg, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '⚙️ Manage Sub-Admins', callback_data: 'manage_sub_admin' }]] } });
+        }
+
         if (text === '🔎 Num Tracker') {
             await updateState(chatId, 'WAITING_TRACK_NUMBER');
             return bot.sendMessage(chatId, "🔎 Send Phone Number to track:", { parse_mode: 'HTML', ...cancelMenu });
         }
+
         if (text === '📢 Broadcast') {
             await updateState(chatId, 'WAITING_BROADCAST');
             return bot.sendMessage(chatId, "📢 <b>Send broadcast message:</b>", { parse_mode: 'HTML', ...cancelMenu });
         }
+
         if (text === '🔴 Maintenance' && isSuperAdmin) {
             if (settings.maintenance_mode) {
                 await supabase.from('bot_settings').update({ maintenance_mode: false }).eq('id', 1);
@@ -341,7 +416,31 @@ bot.on('message', async (msg) => {
                 return bot.sendMessage(chatId, `🔴 <b>Turn ON Maintenance</b>\nType reason:`, { parse_mode: 'HTML', ...cancelMenu });
             }
         }
-        if (text === '📈 Global Stats') return bot.sendMessage(chatId, `📊 Global stats active.`, { parse_mode: 'HTML' });
+
+        if (text === '📈 Global Stats') {
+            const { data: users } = await supabase.from('bot_users').select('telegram_id, first_name, total_otps, total_numbers');
+            let tOtp = 0, tNum = 0;
+            let leaderBoard = [];
+            
+            if (users) { 
+                users.forEach(u => { 
+                    tOtp += (u.total_otps || 0); 
+                    tNum += (u.total_numbers || 0); 
+                    if (u.total_otps > 0) leaderBoard.push(u);
+                }); 
+            }
+
+            leaderBoard.sort((a,b) => b.total_otps - a.total_otps);
+            let statMsg = `📊 <b>Global System Stats</b>\n━━━━━━━━━━━━━━━━━━━━\n👥 <b>Total Users:</b> ${users ? users.length : 0}\n📞 <b>Total Numbers:</b> ${tNum}\n📩 <b>Total OTPs:</b> ${tOtp}\n\n🏆 <b>Top Users Leaderboard:</b>\n`;
+            
+            leaderBoard.slice(0, 3).forEach((u, i) => { 
+                const medals = ['🥇', '🥈', '🥉'];
+                statMsg += `${medals[i]} <b>${u.first_name}</b> - <code>${u.total_otps}</code> OTPs\n`; 
+            });
+
+            const kb = { inline_keyboard: [[{ text: '🗑️ Clear Junk Data', callback_data: 'clean_db' }]] };
+            return bot.sendMessage(chatId, statMsg, { parse_mode: 'HTML', reply_markup: kb });
+        }
     }
 });
 
@@ -354,9 +453,45 @@ bot.on('callback_query', async (query) => {
     const data = query.data;
     
     if(data === 'close') return bot.deleteMessage(chatId, msgId).catch(()=>{});
+
+    // ALL INLINE BUTTONS RESTORED
+    if (data === 'live_traffic') {
+        await bot.editMessageText(`⏳ <b>Refreshing Live Traffic...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+        bot.emit('message', { chat: { id: chatId }, from: query.from, text: '🚦 Traffic' });
+        return bot.deleteMessage(chatId, msgId).catch(()=>{});
+    }
+
+    if (data === 'set_api_btn') {
+        await updateState(chatId, 'WAITING_API_KEY');
+        return bot.sendMessage(chatId, `🌐 <b>API Configuration</b>\n🔑 Provide the new Master mauthapi Key:`, { parse_mode: 'HTML', ...cancelMenu });
+    }
+    
+    if (data === 'manage_sub_admin') {
+        await updateState(chatId, 'WAITING_SUB_ADMIN');
+        return bot.sendMessage(chatId, "🛡️ <b>Manage Sub-Admins</b>\nSend format: <code>TelegramID add</code> OR <code>TelegramID remove</code>", { parse_mode: 'HTML', ...cancelMenu });
+    }
+
     if (data === 'clean_db') {
         await supabase.from('bot_users').update({ current_state: null }).neq('current_state', null);
         return bot.answerCallbackQuery(query.id, { text: `✅ Junk Data Cleared!`, show_alert: true });
+    }
+
+    if (data === 'run_bcast') {
+        let { data: userState } = await supabase.from('bot_users').select('current_state').eq('telegram_id', chatId).single();
+        if (userState && userState.current_state && userState.current_state.startsWith('CONFIRM_BCAST:')) {
+            const bMsg = userState.current_state.replace('CONFIRM_BCAST:', '');
+            await updateState(chatId, null);
+            await bot.editMessageText(`⏳ <b>Broadcasting...</b>`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+            
+            const { data: users } = await supabase.from('bot_users').select('telegram_id');
+            let s = 0, f = 0;
+            for (const u of users) {
+                try { await bot.sendMessage(u.telegram_id, bMsg, { parse_mode: 'HTML' }); s++; } 
+                catch(e){ f++; }
+                await new Promise(res => setTimeout(res, 40)); 
+            }
+            return bot.editMessageText(`📢 <b>Broadcast Completed!</b>\n✅ Delivered: ${s}\n❌ Failed: ${f}`, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+        }
     }
 
     if (data.startsWith('req_num_')) {
