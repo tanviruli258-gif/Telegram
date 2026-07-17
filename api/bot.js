@@ -40,12 +40,14 @@ const getAdminMenu = (isSuperAdmin) => {
             ['📡 API Control', '🛡️ Sub-Admin List'],
             ['⛔ Block Range', '🔎 Num Tracker'],
             ['📢 Broadcast', '📈 Global Stats'],
-            ['🔴 Maintenance', '🔙 Back to Main']
+            ['🔍 Check UID', '🔴 Maintenance'],
+            ['🔙 Back to Main']
         ], resize_keyboard: true } };
     } else {
         return { reply_markup: { keyboard: [
             ['📢 Broadcast', '📈 Global Stats'],
-            ['🔎 Num Tracker', '🔙 Back to Main']
+            ['🔎 Num Tracker', '🔍 Check UID'],
+            ['🔙 Back to Main']
         ], resize_keyboard: true } };
     }
 };
@@ -82,7 +84,65 @@ function checkSpam(chatId) {
     return false;
 }
 
-// 🚀 NUMBER FETCHER (MANUAL FETCH + 5 MIN TIMEOUT UI)
+// ============================================================================
+// 🔥 4. PURE AUTO-OTP ENGINE (THE MISSING BLOCK RESTORED) 🔥
+// ============================================================================
+setInterval(async () => {
+    try {
+        const { data: pendingNumbers } = await supabase.from('active_numbers').select('*').eq('status', 'PENDING');
+        if (!pendingNumbers || pendingNumbers.length === 0) return;
+
+        const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
+        if (!settings || !settings.mauth_api) return;
+
+        const apiUrl = settings.api_base_url || 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
+        const headers = { 'mauthapi': settings.mauth_api };
+        const now = new Date();
+        const activePending = [];
+
+        // 1. Auto-Cancel Timeout (5 Mins)
+        for (const pending of pendingNumbers) {
+            const createdTime = new Date(pending.created_at);
+            const diffMins = (now - createdTime) / 60000;
+
+            if (diffMins >= 5.0) {
+                await supabase.from('active_numbers').update({ status: 'TIMEOUT' }).eq('id', pending.id);
+                bot.sendMessage(pending.telegram_id, `⏳ <b>Time Out!</b>\nNumber <code>${pending.full_number}</code> cancelled (No OTP within 5 mins).`, { parse_mode: 'HTML' }).catch(()=>{});
+            } else {
+                activePending.push(pending);
+            }
+        }
+
+        if (activePending.length === 0) return;
+
+        // 2. Fetch OTP from API
+        const res = await axios.get(`${apiUrl}/success-otp`, { headers });
+        
+        if (res.data && res.data.data && res.data.data.otps) {
+            for (const pending of activePending) {
+                const cleanNum = pending.full_number.replace('+', '').trim();
+                const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+
+                if (otpFound) {
+                    await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
+                    
+                    let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
+                    await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
+
+                    const cleanCode = extractOTP(otpFound.message || "");
+                    const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
+                    
+                    await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
+                    
+                    // Auto-Fetch Next Number
+                    if (u.saved_range) fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
+                }
+            }
+        }
+    } catch (error) {}
+}, 8000); // 8 Seconds interval
+
+// 🚀 5. NUMBER FETCHER
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     const cleanRange = range.replace(/x/gi, '').trim();
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.replace(/x/gi, '').trim());
@@ -120,20 +180,20 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n<i>(Tap the number above to copy it)</i>`;
+        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically...</i>\n\n<i>(Tap the number above to copy it)</i>`;
         
         const kb = { inline_keyboard: [
             [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
-            [{ text: '📩 Fetch OTP', callback_data: `chk_otp_${fullNum}` }]
+            [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${fullNum}` }]
         ]};
         return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML', reply_markup: kb });
     } catch(e) {
-        return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>\nPlease check if your API URL is correct.`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
+        return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
     }
 }
 
 // ============================================================================
-// 5. MAIN MESSAGE PROCESSOR 
+// 6. MAIN MESSAGE PROCESSOR 
 // ============================================================================
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
@@ -152,7 +212,7 @@ bot.on('message', async (msg) => {
     const mainMenu = getMainMenu(isSuperAdmin, isSubAdmin);
     const currentAdminMenu = getAdminMenu(isSuperAdmin);
 
-    // HIDDEN BAN/UNBAN
+    // BAN LOGIC
     if (isAdmin && /^\d+ (ban|unban)$/i.test(text.trim())) {
         const parts = text.trim().toLowerCase().split(' ');
         const targetId = Number(parts[0]);
@@ -168,7 +228,7 @@ bot.on('message', async (msg) => {
 
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are permanently banned.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
     if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>\n\n💬 <i>${settings.maintenance_msg}</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-
+    
     const state = user.current_state;
 
     // STATES
@@ -203,6 +263,11 @@ bot.on('message', async (msg) => {
             await updateState(chatId, null);
             return bot.sendMessage(chatId, "✅ <b>API Base URL Updated!</b>", { parse_mode: 'HTML', ...currentAdminMenu });
         }
+        if (state === 'WAITING_FB_COOKIE' && isSuperAdmin) {
+            await supabase.from('bot_settings').update({ fb_cookie: text.trim() }).eq('id', 1);
+            await updateState(chatId, null);
+            return bot.sendMessage(chatId, "✅ <b>Facebook Cookie Saved Successfully!</b>\nYour UID checker is now ready for Real Verification.", { parse_mode: 'HTML', ...currentAdminMenu });
+        }
         if (state === 'WAITING_BLACKLIST_RANGE' && isSuperAdmin) {
             const newBlacklist = text.trim().toLowerCase() === 'clear' ? '' : text.trim();
             await supabase.from('bot_settings').update({ blacklisted_ranges: newBlacklist }).eq('id', 1);
@@ -234,6 +299,42 @@ bot.on('message', async (msg) => {
         if (state === 'WAITING_BROADCAST') {
             await updateState(chatId, `CONFIRM_BCAST:${text}`);
             return bot.sendMessage(chatId, `📢 <b>Broadcast Preview:</b>\n\n${text}\n\n<i>Send this to all users?</i>`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '✅ Send Now', callback_data: 'run_bcast' }, { text: '❌ Cancel', callback_data: 'close' }]] } });
+        }
+        
+        // 🔥 REAL UID CHECKER LOGIC 🔥
+        if (state === 'WAITING_UID') {
+            const uid = text.trim();
+            await updateState(chatId, null);
+            const waitMsg = await bot.sendMessage(chatId, `⏳ <b>Checking UID:</b> <code>${uid}</code>...`, { parse_mode: 'HTML' });
+            
+            try {
+                const fbCookie = settings.fb_cookie;
+                if (!fbCookie) {
+                    return bot.editMessageText(`❌ <b>Facebook Cookie is not set!</b>\nPlease set it from the API Control Panel first.`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+                }
+
+                const res = await axios.get(`https://mbasic.facebook.com/${uid}`, {
+                    headers: { 
+                        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
+                        'Cookie': fbCookie
+                    },
+                    validateStatus: function (status) { return true; }, 
+                    maxRedirects: 0 
+                });
+
+                if (res.status === 200) {
+                     bot.editMessageText(`✅ <b>UID is LIVE!</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>UID:</b> <code>${uid}</code>\n🔗 <b>Link:</b> https://www.facebook.com/${uid}`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+                } else if (res.status === 404) {
+                     bot.editMessageText(`❌ <b>UID is DEAD / NOT FOUND!</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>UID:</b> <code>${uid}</code>`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+                } else if (res.status === 302) {
+                     bot.editMessageText(`⚠️ <b>Cookie Expired or Dead!</b>\nFacebook blocked the request or the session is invalid. Please update the FB Cookie.`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+                } else {
+                     bot.editMessageText(`⚠️ <b>Verification Error!</b>\nStatus Code: ${res.status}\nFacebook might be temporarily blocking the IP.`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+                }
+            } catch(e) {
+                bot.editMessageText(`❌ <b>Network Error checking UID.</b>`, { chat_id: chatId, message_id: waitMsg.message_id, parse_mode: 'HTML' });
+            }
+            return;
         }
     }
 
@@ -303,32 +404,26 @@ bot.on('message', async (msg) => {
 
     if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support:</b> 👉 <b>@SiyamExclusive</b>`, { parse_mode: 'HTML' });
     
-    // ADMIN UI RESTORED FULLY
+    // ADMIN UI 
     if (isAdmin) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...currentAdminMenu });
         
+        if (text === '🔍 Check UID') {
+            await updateState(chatId, 'WAITING_UID');
+            return bot.sendMessage(chatId, "🔍 <b>Real UID Checker</b>\n━━━━━━━━━━━━━━━━━━━━\nSend the Facebook UID you want to check:", { parse_mode: 'HTML', ...cancelMenu });
+        }
+
         if (text === '📡 API Control' && isSuperAdmin) {
-            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Checking API connection...</b>`, { parse_mode: 'HTML' });
-            let bal = "Not Provided", status = "🔴 OFFLINE / INVALID";
-            try {
-                const headers = { 'mauthapi': settings.mauth_api };
-                const res = await axios.get(`${apiUrl}/console`, { headers });
-                if(res.data && res.data.meta && res.data.meta.code === 200) {
-                    status = "🟢 ACTIVE";
-                    if (res.data.data) {
-                        const b = res.data.data.balance ?? res.data.data.credit ?? res.data.data.amount;
-                        bal = b !== undefined ? `$${b}` : "Hidden";
-                    }
-                }
-            } catch(e) {}
+            const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Checking configurations...</b>`, { parse_mode: 'HTML' });
             
             const api = settings.mauth_api || "";
             const maskedApi = api.length > 8 ? `${api.substring(0, 4)}${'*'.repeat(12)}${api.substring(api.length - 4)}` : 'Not Set';
+            const cookieStatus = settings.fb_cookie ? "🟢 Active" : "🔴 Not Set";
             
-            const msg = `📡 <b>API Control Center</b>\n━━━━━━━━━━━━━━━━━━━━\n⚡ <b>Status:</b> ${status}\n🔑 <b>API Key:</b> <code>${maskedApi}</code>\n🔗 <b>API URL:</b> <code>${apiUrl}</code>\n💰 <b>Balance:</b> ${bal}`;
+            const msg = `📡 <b>API Control Center</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 <b>API Key:</b> <code>${maskedApi}</code>\n🔗 <b>API URL:</b> <code>${apiUrl}</code>\n🍪 <b>FB Cookie:</b> ${cookieStatus}`;
             const kb = { inline_keyboard: [
-                [{ text: '🔑 Set New API Key', callback_data: 'set_api_btn' }],
-                [{ text: '🔗 Set New API URL', callback_data: 'set_api_url_btn' }]
+                [{ text: '🔑 Set API Key', callback_data: 'set_api_btn' }, { text: '🔗 Set API URL', callback_data: 'set_api_url_btn' }],
+                [{ text: '🍪 Set FB Cookie', callback_data: 'set_fb_cookie_btn' }]
             ]};
             return bot.editMessageText(msg, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', reply_markup: kb });
         }
@@ -353,21 +448,6 @@ bot.on('message', async (msg) => {
         if (text === '🔎 Num Tracker') {
             await updateState(chatId, 'WAITING_TRACK_NUMBER');
             return bot.sendMessage(chatId, "🔎 Send Phone Number to track:", { parse_mode: 'HTML', ...cancelMenu });
-        }
-
-        if (text === '📢 Broadcast') {
-            await updateState(chatId, 'WAITING_BROADCAST');
-            return bot.sendMessage(chatId, "📢 <b>Send broadcast message:</b>", { parse_mode: 'HTML', ...cancelMenu });
-        }
-
-        if (text === '🔴 Maintenance' && isSuperAdmin) {
-            if (settings.maintenance_mode) {
-                await supabase.from('bot_settings').update({ maintenance_mode: false }).eq('id', 1);
-                return bot.sendMessage(chatId, `🟢 <b>Maintenance OFF!</b>`, { parse_mode: 'HTML' });
-            } else {
-                await updateState(chatId, 'WAITING_MAINTENANCE_MSG');
-                return bot.sendMessage(chatId, `🔴 <b>Turn ON Maintenance</b>\nType reason:`, { parse_mode: 'HTML', ...cancelMenu });
-            }
         }
 
         if (text === '📈 Global Stats') {
@@ -398,7 +478,7 @@ bot.on('message', async (msg) => {
 });
 
 // ============================================================================
-// 6. CALLBACK PROCESSOR (Inline Buttons)
+// 7. CALLBACK PROCESSOR (Inline Buttons)
 // ============================================================================
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
@@ -420,7 +500,12 @@ bot.on('callback_query', async (query) => {
     
     if (data === 'set_api_url_btn') {
         await updateState(chatId, 'WAITING_API_URL');
-        return bot.sendMessage(chatId, `🔗 <b>API URL Configuration</b>\nProvide the new API Base URL\n(e.g., <code>https://api.voltxsms.com/MXS.../@public/api</code>):`, { parse_mode: 'HTML', ...cancelMenu });
+        return bot.sendMessage(chatId, `🔗 <b>API URL Configuration</b>\nProvide the new API Base URL:`, { parse_mode: 'HTML', ...cancelMenu });
+    }
+    
+    if (data === 'set_fb_cookie_btn') {
+        await updateState(chatId, 'WAITING_FB_COOKIE');
+        return bot.sendMessage(chatId, `🍪 <b>FB Cookie Configuration</b>\nProvide your active Facebook Cookie (datr=...; c_user=...; xs=...):`, { parse_mode: 'HTML', ...cancelMenu });
     }
     
     if (data === 'manage_sub_admin') {
@@ -465,11 +550,8 @@ bot.on('callback_query', async (query) => {
         
         try {
             let { data: actStatus } = await supabase.from('active_numbers').select('status, created_at').eq('telegram_id', chatId).eq('full_number', num).single();
-            if (actStatus && actStatus.status === 'COMPLETED') {
-                 return bot.answerCallbackQuery(query.id, { text: `✅ OTP already processed!`, show_alert: true });
-            }
-            
-            // Check 5 Mins Timeout manually
+            if (actStatus && actStatus.status === 'COMPLETED') return bot.answerCallbackQuery(query.id, { text: `✅ OTP already processed!`, show_alert: true });
+
             if (actStatus) {
                 const diffMins = (new Date() - new Date(actStatus.created_at)) / 60000;
                 if (diffMins >= 5.0) {
@@ -493,7 +575,7 @@ bot.on('callback_query', async (query) => {
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
                 const cleanCode = extractOTP(otpFound.message || "");
-                const smsg = `✅ <b>OTP Received!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
+                const smsg = `✅ <b>OTP Received! (Manual)</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
                 await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
                 
                 let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
