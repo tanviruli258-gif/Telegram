@@ -16,12 +16,10 @@ const API_BASE_URL = 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
-
 const cooldowns = new Map();
-const pendingUI = new Map(); // 🌟 For Live Progress Bar
 
 // ============================================================================
-// 1.5 KEEP-ALIVE SERVER
+// 1.5 KEEP-ALIVE SERVER (For Render & UptimeRobot)
 // ============================================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -80,19 +78,15 @@ function extractOTP(message) {
 
 function checkSpam(chatId) {
     const now = Date.now();
-    if (cooldowns.has(chatId) && (now - cooldowns.get(chatId)) < 3000) return true; // 3s limits
+    if (cooldowns.has(chatId) && (now - cooldowns.get(chatId)) < 3000) return true; 
     cooldowns.set(chatId, now);
     return false;
 }
 
 // ============================================================================
-// 🔥 4. AUTO OTP ENGINE (Live Progress & 5 Min Timeout)
+// 🔥 4. PURE AUTO-OTP ENGINE (SILENT BACKGROUND CHECK)
 // ============================================================================
-let checkTick = 0;
-const frames = ['[█░░░░░]', '[██░░░░]', '[███░░░]', '[████░░]', '[█████░]', '[██████]'];
-
 setInterval(async () => {
-    checkTick++;
     try {
         const { data: pendingNumbers } = await supabase.from('active_numbers').select('*').eq('status', 'PENDING');
         if (!pendingNumbers || pendingNumbers.length === 0) return;
@@ -104,16 +98,14 @@ setInterval(async () => {
         const now = new Date();
         const activePending = [];
 
-        // 1. 5 Minute Timeout Check
+        // 1. Auto-Cancel Timeout (5 Mins)
         for (const pending of pendingNumbers) {
             const createdTime = new Date(pending.created_at);
             const diffMins = (now - createdTime) / 60000;
 
             if (diffMins >= 5.0) {
                 await supabase.from('active_numbers').update({ status: 'TIMEOUT' }).eq('id', pending.id);
-                const timeoutMsg = `⏳ <b>Time Out!</b>\n━━━━━━━━━━━━━━━━━━━━\nNumber <code>${pending.full_number}</code> has been cancelled automatically because no OTP arrived within 5 minutes.`;
-                bot.sendMessage(pending.telegram_id, timeoutMsg, { parse_mode: 'HTML' }).catch(()=>{});
-                pendingUI.delete(pending.full_number);
+                bot.sendMessage(pending.telegram_id, `⏳ <b>Time Out!</b>\nNumber <code>${pending.full_number}</code> cancelled (No OTP within 5 mins).`, { parse_mode: 'HTML' }).catch(()=>{});
             } else {
                 activePending.push(pending);
             }
@@ -121,45 +113,35 @@ setInterval(async () => {
 
         if (activePending.length === 0) return;
 
-        // 2. Auto Check API
+        // 2. Fetch OTP from API
         const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
-        const currentFrame = frames[checkTick % frames.length];
-
+        
         if (res.data && res.data.data && res.data.data.otps) {
             for (const pending of activePending) {
                 const cleanNum = pending.full_number.replace('+', '').trim();
                 const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
 
                 if (otpFound) {
-                    // Update DB & Send OTP
                     await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
+                    
                     let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
                     await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
 
                     const cleanCode = extractOTP(otpFound.message || "");
-                    const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n\n🔑 <b>Code:</b>\n👉 <code>${cleanCode}</code> 👈`;
-                    await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
-
-                    pendingUI.delete(pending.full_number); // Clean UI map
+                    const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
                     
-                    // ⚡ Auto-Fetch Next Number ⚡
+                    // Send directly to user
+                    await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
+                    
+                    // Auto-Fetch Next Number
                     if (u.saved_range) fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
-                } else {
-                    // 3. Live Update Progress Bar UI
-                    const uiData = pendingUI.get(pending.full_number);
-                    if (uiData) {
-                        const waitMsg = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n📋 <b>Range:</b> <code>${uiData.range}</code>\n\n⏳ <i>${currentFrame} Live Checking...</i>\n⏱️ <i>Valid for 5 minutes.</i>\n\n<i>(Tap the number above to copy it)</i>`;
-                        const kb = { inline_keyboard: [
-                            [{ text: '🔄 Change Number', callback_data: `req_num_${uiData.range}` }],
-                            [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${pending.full_number}` }]
-                        ]};
-                        bot.editMessageText(waitMsg, { chat_id: uiData.chatId, message_id: uiData.msgId, parse_mode: 'HTML', reply_markup: kb }).catch(()=>{});
-                    }
                 }
             }
         }
-    } catch (error) {}
-}, 7000); // 🚀 7 seconds fast interval
+    } catch (error) {
+        // Catch silently so server never crashes
+    }
+}, 8000); // 8 Seconds interval
 
 // 🚀 NUMBER FETCHER
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
@@ -167,20 +149,19 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.replace(/x/gi, '').trim());
     
     if (blacklisted.includes(cleanRange)) {
-        const blockMsg = `🚫 <b>Admin Blocked This Range!</b>\n━━━━━━━━━━━━━━━━━━━━\nএই রেঞ্জটি সাময়িকভাবে বন্ধ করা হয়েছে। অনুগ্রহ করে সাপোর্টে যোগাযোগ করুন: 👉 <b>@SiyamExclusive</b>`;
+        const blockMsg = `🚫 <b>Admin Blocked This Range!</b>\n━━━━━━━━━━━━━━━━━━━━\nএই রেঞ্জটি সাময়িকভাবে বন্ধ করা হয়েছে।`;
         if (editMsgId) return bot.editMessageText(blockMsg, { chat_id: chatId, message_id: editMsgId, parse_mode: 'HTML' }).catch(()=>{});
         return bot.sendMessage(chatId, blockMsg, { parse_mode: 'HTML' });
     }
 
     const waitText = `⏳ <b>Allocating new number from <code>${range}</code>...</b>`;
     let msgIdToEdit = editMsgId;
-    let finalMsg;
     
     if (editMsgId) {
-        finalMsg = await bot.editMessageText(waitText, { chat_id: chatId, message_id: editMsgId, parse_mode: 'HTML' }).catch(()=>{});
+        await bot.editMessageText(waitText, { chat_id: chatId, message_id: editMsgId, parse_mode: 'HTML' }).catch(()=>{});
     } else {
-        finalMsg = await bot.sendMessage(chatId, waitText, { parse_mode: 'HTML' });
-        msgIdToEdit = finalMsg.message_id;
+        const msg = await bot.sendMessage(chatId, waitText, { parse_mode: 'HTML' });
+        msgIdToEdit = msg.message_id;
     }
 
     try {
@@ -199,10 +180,9 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        // 🌟 Save to UI Map for Live Animation
-        pendingUI.set(fullNum, { chatId, msgId: msgIdToEdit, range });
-
-        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>[█░░░░░] Live Checking...</i>\n⏱️ <i>Valid for 5 minutes.</i>\n\n<i>(Tap the number above to copy it)</i>`;
+        // STATIC STATIC STATIC - No Animation
+        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically...</i>\n\n<i>(Tap the number above to copy it)</i>`;
+        
         const kb = { inline_keyboard: [
             [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
             [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${fullNum}` }]
@@ -246,7 +226,7 @@ bot.on('message', async (msg) => {
     }
 
     if (user.is_banned) return bot.sendMessage(chatId, "🚫 <b>You are permanently banned.</b>", { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
-    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>\n\n💬 <i>${settings.maintenance_msg}</i>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
+    if (settings.maintenance_mode && !isAdmin) return bot.sendMessage(chatId, `🛠️ <b>Bot Under Maintenance!</b>`, { parse_mode: 'HTML', reply_markup: { remove_keyboard: true } });
 
     const state = user.current_state;
 
@@ -311,20 +291,23 @@ bot.on('message', async (msg) => {
     }
 
     if (text.startsWith('/start')) return bot.sendMessage(chatId, `👋 <b>Welcome to the Premium SMS Bot!</b>`, { parse_mode: 'HTML', ...mainMenu });
+    
     if (text === '⚙️ Set Range') {
         await updateState(chatId, 'WAITING_RANGE');
         return bot.sendMessage(chatId, `⚙️ <b>Range Configuration</b>\n🔢 Type the Range ID:`, { parse_mode: 'HTML', ...cancelMenu });
     }
+    
     if (text === '🚀 Get Number') {
-        if (checkSpam(chatId)) return bot.sendMessage(chatId, "⚠️ <b>Please wait 3 seconds before requesting again.</b>", { parse_mode: 'HTML' }).then(m => setTimeout(()=> bot.deleteMessage(chatId, m.message_id).catch(()=>{}), 3000));
+        if (checkSpam(chatId)) return bot.sendMessage(chatId, "⚠️ <b>Wait 3 seconds...</b>", { parse_mode: 'HTML' }).then(m => setTimeout(()=> bot.deleteMessage(chatId, m.message_id).catch(()=>{}), 3000));
         if (!user.saved_range) {
             await updateState(chatId, 'WAITING_RANGE');
             return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>", { parse_mode: 'HTML', ...cancelMenu });
         }
-        // 🧹 Cancel previous pending numbers for this user
+        // Auto-Cancel previous active pending before fetching new
         await supabase.from('active_numbers').update({ status: 'CANCELLED' }).eq('telegram_id', chatId).eq('status', 'PENDING');
         return fetchNumberAction(chatId, user.saved_range, settings, null);
     }
+    
     if (text === '🔐 2FA') {
         await updateState(chatId, 'WAITING_2FA_SECRET');
         return bot.sendMessage(chatId, "🔐 <b>2FA Authenticator</b>\nSend Secret Key:", { parse_mode: 'HTML', ...cancelMenu });
@@ -332,7 +315,7 @@ bot.on('message', async (msg) => {
     if (text === '🚦 Traffic') return bot.sendMessage(chatId, `⏳ <b>Traffic feature available in previous config.</b>`, { parse_mode: 'HTML' });
     if (text === '🎧 Support') return bot.sendMessage(chatId, `👨‍💻 <b>Support:</b> 👉 <b>@SiyamExclusive</b>`, { parse_mode: 'HTML' });
     
-    // ADMIN UI Commands
+    // ADMIN UI
     if (isAdmin) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...currentAdminMenu });
         if (text === '📡 API Control' && isSuperAdmin) return bot.sendMessage(chatId, `API settings available via Inline buttons.`, { parse_mode: 'HTML' });
@@ -378,20 +361,17 @@ bot.on('callback_query', async (query) => {
 
     if (data.startsWith('req_num_')) {
         if (checkSpam(chatId)) return bot.answerCallbackQuery(query.id, { text: `⚠️ Wait 3 seconds...`, show_alert: false });
-        // 🧹 Cancel previous pending numbers
         await supabase.from('active_numbers').update({ status: 'CANCELLED' }).eq('telegram_id', chatId).eq('status', 'PENDING');
         const range = data.replace('req_num_', '');
         const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
         return fetchNumberAction(chatId, range, settings, msgId);
     }
 
-    // 📩 MANUAL OTP FETCH LOGIC (Double trigger protection added)
     if (data.startsWith('chk_otp_')) {
         const num = data.replace('chk_otp_', '');
         const cleanNum = num.replace('+', '').trim();
         
         try {
-            // Check if already auto-completed to prevent double messages
             let { data: actStatus } = await supabase.from('active_numbers').select('status').eq('telegram_id', chatId).eq('full_number', num).single();
             if (actStatus && actStatus.status === 'COMPLETED') {
                  return bot.answerCallbackQuery(query.id, { text: `✅ OTP already processed!`, show_alert: true });
@@ -409,22 +389,19 @@ bot.on('callback_query', async (query) => {
                 await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', chatId);
                 await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
 
-                pendingUI.delete(num); // Remove from live UI
-
                 const cleanCode = extractOTP(otpFound.message || "");
                 const smsg = `✅ <b>OTP Received! (Manual)</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
                 await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
                 
-                // ⚡ Next Number Fetch ⚡
                 let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
                 let rangeToFetch = act ? act.range_prefix : u.saved_range;
                 if(rangeToFetch) await fetchNumberAction(chatId, rangeToFetch, settings, null);
                 return;
             } else {
-                return bot.answerCallbackQuery(query.id, { text: `⏳ OTP not received yet. Wait a few seconds!`, show_alert: true });
+                return bot.answerCallbackQuery(query.id, { text: `⏳ Not received yet. Wait...`, show_alert: true });
             }
         } catch(e) {
-            return bot.answerCallbackQuery(query.id, { text: `❌ API Error while checking OTP.`, show_alert: true });
+            return bot.answerCallbackQuery(query.id, { text: `❌ API Error.`, show_alert: true });
         }
     }
 });
