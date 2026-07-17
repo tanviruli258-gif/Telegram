@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const { authenticator } = require('otplib');
-const express = require('express'); // 🚀 Keep-Alive এর জন্য
+const express = require('express');
 
 // ============================================================================
 // 1. SYSTEM CONFIGURATIONS
@@ -14,17 +14,18 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPER_ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : []; 
 const API_BASE_URL = 'https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api';
 
-// Render এ Long Polling ব্যবহার করা হলো (Webhook নয়)
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
+// Anti-Spam Memory
+const cooldowns = new Map();
+
 // ============================================================================
-// 1.5 KEEP-ALIVE SERVER (Uptime/Cronjob এর জন্য ১০০% নিরাপদ)
+// 1.5 KEEP-ALIVE SERVER (For Render & UptimeRobot)
 // ============================================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// UptimeRobot বা Cron-job শুধু এই লিংকে হিট করবে, বটের মেসেজে কোনো প্রভাব পড়বে না
 app.get('/', (req, res) => {
     res.status(200).send('Bot is running and awake! 🚀');
 });
@@ -34,14 +35,10 @@ app.listen(PORT, () => {
 });
 
 // ============================================================================
-// 2. PROFESSIONAL MENUS & UI
+// 2. MENUS & UI
 // ============================================================================
 const getMainMenu = (isSuperAdmin, isSubAdmin) => {
-    const kb = [
-        ['🚀 Get Number', '⚙️ Set Range'], 
-        ['🚦 Traffic', '🔐 2FA'], 
-        ['🎧 Support'] 
-    ];
+    const kb = [['🚀 Get Number', '⚙️ Set Range'], ['🚦 Traffic', '🔐 2FA'], ['🎧 Support']];
     if (isSuperAdmin || isSubAdmin) kb.push(['👑 Admin Panel']);
     return { reply_markup: { keyboard: kb, resize_keyboard: true } };
 };
@@ -87,59 +84,78 @@ function extractOTP(message) {
     return match ? match[0] : message;
 }
 
+function checkSpam(chatId) {
+    const now = Date.now();
+    if (cooldowns.has(chatId) && (now - cooldowns.get(chatId)) < 3000) return true; // 3 seconds cooldown
+    cooldowns.set(chatId, now);
+    return false;
+}
+
 // ============================================================================
-// 🔥 4. AUTO OTP POLLING ENGINE (The Magic)
+// 🔥 4. AUTO OTP ENGINE & 5 MINUTE TIMEOUT
 // ============================================================================
-// প্রতি ৬ সেকেন্ড পর পর চেক করবে, শুধু পেন্ডিং নাম্বারগুলোর জন্য
 setInterval(async () => {
     try {
         const { data: pendingNumbers } = await supabase.from('active_numbers').select('*').eq('status', 'PENDING');
-        
-        if (pendingNumbers && pendingNumbers.length > 0) {
-            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
-            if (!settings || !settings.mauth_api) return;
+        if (!pendingNumbers || pendingNumbers.length === 0) return;
 
-            const headers = { 'mauthapi': settings.mauth_api };
-            const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
-            
-            if (res.data && res.data.data && res.data.data.otps) {
-                for (const pending of pendingNumbers) {
-                    const cleanNum = pending.full_number.replace('+', '').trim();
-                    const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+        const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
+        if (!settings || !settings.mauth_api) return;
 
-                    if (otpFound) {
-                        // 1. ডাটাবেজ আপডেট (যাতে একই মেসেজ ২ বার না যায়)
-                        await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
-                        
-                        let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
-                        await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
+        const headers = { 'mauthapi': settings.mauth_api };
+        const now = new Date();
+        const activePending = [];
 
-                        const cleanCode = extractOTP(otpFound.message || "");
-                        
-                        // 2. অটোমেটিক OTP মেসেজ সেন্ড
-                        const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n\n🔑 <b>Verification Code:</b>\n👉 <code>${cleanCode}</code> 👈`;
-                        await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
+        // 1. Auto-Cancel Timeout Logic (5 Minutes)
+        for (const pending of pendingNumbers) {
+            const createdTime = new Date(pending.created_at);
+            const diffMins = (now - createdTime) / 60000;
 
-                        // 3. ⚡ SEAMLESS AUTO-FETCH NEXT NUMBER ⚡
-                        if (u.saved_range) {
-                            fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
-                        }
+            if (diffMins >= 5.0) {
+                await supabase.from('active_numbers').update({ status: 'TIMEOUT' }).eq('id', pending.id);
+                const timeoutMsg = `⏳ <b>Time Out!</b>\n━━━━━━━━━━━━━━━━━━━━\nNumber <code>${pending.full_number}</code> has been cancelled automatically because no OTP arrived within 5 minutes.`;
+                await bot.sendMessage(pending.telegram_id, timeoutMsg, { parse_mode: 'HTML' }).catch(()=>{});
+            } else {
+                activePending.push(pending);
+            }
+        }
+
+        if (activePending.length === 0) return;
+
+        // 2. Fetch OTP for active numbers (12s interval to avoid Block)
+        const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
+        if (res.data && res.data.data && res.data.data.otps) {
+            for (const pending of activePending) {
+                const cleanNum = pending.full_number.replace('+', '').trim();
+                const otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+
+                if (otpFound) {
+                    await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('id', pending.id);
+                    
+                    let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', pending.telegram_id).single();
+                    await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', pending.telegram_id);
+
+                    const cleanCode = extractOTP(otpFound.message || "");
+                    const smsg = `✅ <b>OTP Received Automatically!</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${pending.full_number}</code>\n\n🔑 <b>Code:</b>\n👉 <code>${cleanCode}</code> 👈`;
+                    await bot.sendMessage(pending.telegram_id, smsg, { parse_mode: 'HTML' }).catch(()=>{});
+
+                    // ⚡ Auto-Fetch Next Number ⚡
+                    if (u.saved_range) {
+                        fetchNumberAction(pending.telegram_id, u.saved_range, settings, null);
                     }
                 }
             }
         }
-    } catch (error) {
-        // Silent catch for background process
-    }
-}, 6000);
+    } catch (error) {}
+}, 12000); // 12 seconds safe interval
 
-// 🚀 NUMBER FETCHER (Modified for Auto-OTP)
+// 🚀 NUMBER FETCHER
 async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
     const cleanRange = range.replace(/x/gi, '').trim();
     const blacklisted = (settings.blacklisted_ranges || '').split(',').map(r => r.replace(/x/gi, '').trim());
     
     if (blacklisted.includes(cleanRange)) {
-        const blockMsg = `🚫 <b>Admin Blocked This Range!</b>\n━━━━━━━━━━━━━━━━━━━━\nএই রেঞ্জটি সাময়িকভাবে বন্ধ করা হয়েছে। অনুগ্রহ করে অন্য রেঞ্জ চেষ্টা করুন অথবা সাপোর্টে যোগাযোগ করুন: 👉 <b>@SiyamExclusive</b>`;
+        const blockMsg = `🚫 <b>Admin Blocked This Range!</b>\n━━━━━━━━━━━━━━━━━━━━\nএই রেঞ্জটি সাময়িকভাবে বন্ধ করা হয়েছে। অনুগ্রহ করে সাপোর্টে যোগাযোগ করুন: 👉 <b>@SiyamExclusive</b>`;
         if (editMsgId) return bot.editMessageText(blockMsg, { chat_id: chatId, message_id: editMsgId, parse_mode: 'HTML' }).catch(()=>{});
         return bot.sendMessage(chatId, blockMsg, { parse_mode: 'HTML' });
     }
@@ -170,9 +186,13 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
         let { data: u } = await supabase.from('bot_users').select('total_numbers').eq('telegram_id', chatId).single();
         await supabase.from('bot_users').update({ total_numbers: (u.total_numbers || 0) + 1 }).eq('telegram_id', chatId);
 
-        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>Waiting for OTP automatically... (Do not click anything)</i>\n\n<i>(Tap the number above to copy it instantly)</i>`;
+        // UI with Progress Bar & 5 Min Timer info
+        const msgText = `🆕 <b>New number allocated!</b>\n\n📱 <b>Number:</b> <code>${fullNum}</code>\n📋 <b>Range:</b> <code>${range}</code>\n\n⏳ <i>[████░░░░░░] Auto-fetching OTP...</i>\n⏱️ <i>Valid for 5 minutes.</i>\n\n<i>(Tap the number above to copy it)</i>`;
         
-        const kb = { inline_keyboard: [[{ text: '🔄 Change Number', callback_data: `req_num_${range}` }]] };
+        const kb = { inline_keyboard: [
+            [{ text: '🔄 Change Number', callback_data: `req_num_${range}` }],
+            [{ text: '📩 Fetch OTP (Manual)', callback_data: `chk_otp_${fullNum}` }]
+        ]};
         return bot.editMessageText(msgText, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML', reply_markup: kb });
     } catch(e) {
         return bot.editMessageText(`❌ <b>Network Error! Server is unreachable.</b>`, { chat_id: chatId, message_id: msgIdToEdit, parse_mode: 'HTML' });
@@ -180,7 +200,7 @@ async function fetchNumberAction(chatId, range, settings, editMsgId = null) {
 }
 
 // ============================================================================
-// 5. MAIN MESSAGE PROCESSOR (Polling)
+// 5. MAIN MESSAGE PROCESSOR 
 // ============================================================================
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
@@ -198,7 +218,6 @@ bot.on('message', async (msg) => {
     const mainMenu = getMainMenu(isSuperAdmin, isSubAdmin);
     const currentAdminMenu = getAdminMenu(isSuperAdmin);
 
-    // HIDDEN BAN/UNBAN COMMAND
     if (isAdmin && /^\d+ (ban|unban)$/i.test(text.trim())) {
         const parts = text.trim().toLowerCase().split(' ');
         const targetId = Number(parts[0]);
@@ -217,9 +236,6 @@ bot.on('message', async (msg) => {
 
     const state = user.current_state;
 
-    // ------------------------------------------------------------------------
-    // USER INPUT STATES
-    // ------------------------------------------------------------------------
     if (state === 'WAITING_RANGE') {
         const range = text.trim().toUpperCase().replace(/X/g, '');
         if(isNaN(range)) return bot.sendMessage(chatId, "⚠️ <b>Invalid range! Please send numbers only.</b>", { parse_mode: 'HTML' });
@@ -263,7 +279,7 @@ bot.on('message', async (msg) => {
             await updateState(chatId, null);
             
             bot.sendMessage(chatId, `✅ <b>Sub-Admin access updated.</b>`, { parse_mode: 'HTML', ...currentAdminMenu });
-            if (isAdding) bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b> of this bot.`, { parse_mode: 'HTML' }).catch(()=>{});
+            if (isAdding) bot.sendMessage(targetId, `🎉 <b>Congratulations!</b>\nYou have been promoted to <b>Sub-Admin</b>.`, { parse_mode: 'HTML' }).catch(()=>{});
             return;
         }
         if (state === 'WAITING_TRACK_NUMBER') {
@@ -271,9 +287,9 @@ bot.on('message', async (msg) => {
             const { data: records } = await supabase.from('active_numbers').select('*').like('full_number', `%${searchNum}%`).order('created_at', { ascending: false }).limit(3);
             await updateState(chatId, null);
             
-            if (!records || records.length === 0) return bot.sendMessage(chatId, `❌ <b>No records found for:</b> <code>${searchNum}</code>`, { parse_mode: 'HTML', ...currentAdminMenu });
+            if (!records || records.length === 0) return bot.sendMessage(chatId, `❌ <b>No records found.</b>`, { parse_mode: 'HTML', ...currentAdminMenu });
             
-            let trackMsg = `🔎 <b>Number Tracking Results</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+            let trackMsg = `🔎 <b>Tracking Results</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
             records.forEach(r => {
                 const date = new Date(r.created_at).toLocaleDateString('en-GB');
                 trackMsg += `📱 <b>Num:</b> <code>${r.full_number}</code>\n👤 <b>User ID:</b> <code>${r.telegram_id}</code>\n🗓 <b>Date:</b> ${date}\n\n`;
@@ -283,7 +299,7 @@ bot.on('message', async (msg) => {
         if (state === 'WAITING_MAINTENANCE_MSG' && isSuperAdmin) {
             await supabase.from('bot_settings').update({ maintenance_mode: true, maintenance_msg: text }).eq('id', 1);
             await updateState(chatId, null);
-            return bot.sendMessage(chatId, `🔴 <b>Maintenance Mode is now ON!</b>\nReason saved successfully.`, { parse_mode: 'HTML', ...currentAdminMenu });
+            return bot.sendMessage(chatId, `🔴 <b>Maintenance Mode is now ON!</b>`, { parse_mode: 'HTML', ...currentAdminMenu });
         }
         if (state === 'WAITING_BROADCAST') {
             await updateState(chatId, `CONFIRM_BCAST:${text}`);
@@ -291,9 +307,6 @@ bot.on('message', async (msg) => {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // MAIN MENU COMMANDS
-    // ------------------------------------------------------------------------
     if (text.startsWith('/start')) {
         return bot.sendMessage(chatId, `👋 <b>Welcome to the Premium SMS Bot!</b>\n\n🤖 I am your advanced assistant for getting verification codes (OTP) quickly and securely.`, { parse_mode: 'HTML', ...mainMenu });
     }
@@ -305,6 +318,8 @@ bot.on('message', async (msg) => {
     }
 
     if (text === '🚀 Get Number') {
+        if (checkSpam(chatId)) return bot.sendMessage(chatId, "⚠️ <b>Please wait 3 seconds before requesting again.</b>", { parse_mode: 'HTML' }).then(m => setTimeout(()=> bot.deleteMessage(chatId, m.message_id).catch(()=>{}), 3000));
+        
         if (!user.saved_range) {
             await updateState(chatId, 'WAITING_RANGE');
             return bot.sendMessage(chatId, "⚙️ <b>You haven't set a range yet!</b>\nPlease type the Range ID you want to use:", { parse_mode: 'HTML', ...cancelMenu });
@@ -363,7 +378,7 @@ bot.on('message', async (msg) => {
         return bot.sendMessage(chatId, supMsg, { parse_mode: 'HTML' });
     }
 
-    // 👑 ADMIN COMMANDS
+    // 👑 ADMIN COMMANDS UI
     if (isAdmin) {
         if (text === '👑 Admin Panel') return bot.sendMessage(chatId, "🔐 <b>Admin Control Center Authorized.</b>", { parse_mode: 'HTML', ...currentAdminMenu });
         
@@ -486,9 +501,47 @@ bot.on('callback_query', async (query) => {
     }
 
     if (data.startsWith('req_num_')) {
+        if (checkSpam(chatId)) return bot.answerCallbackQuery(query.id, { text: `⚠️ Wait 3 seconds...`, show_alert: false });
         const range = data.replace('req_num_', '');
         const { data: settings } = await supabase.from('bot_settings').select('*').eq('id', 1).single();
         return fetchNumberAction(chatId, range, settings, msgId);
+    }
+
+    // 📩 MANUAL OTP FETCH BACKUP LOGIC
+    if (data.startsWith('chk_otp_')) {
+        const num = data.replace('chk_otp_', '');
+        const cleanNum = num.replace('+', '').trim();
+        
+        try {
+            const { data: settings } = await supabase.from('bot_settings').select('mauth_api').eq('id', 1).single();
+            const headers = { 'mauthapi': settings.mauth_api };
+
+            const res = await axios.get(`${API_BASE_URL}/success-otp`, { headers });
+            let otpFound = null;
+            if(res.data && res.data.data && res.data.data.otps) {
+                otpFound = res.data.data.otps.find(o => o.number && o.number.includes(cleanNum));
+            }
+
+            if (otpFound) {
+                let { data: u } = await supabase.from('bot_users').select('total_otps, saved_range').eq('telegram_id', chatId).single();
+                await supabase.from('bot_users').update({ total_otps: (u.total_otps || 0) + 1 }).eq('telegram_id', chatId);
+                await supabase.from('active_numbers').update({ status: 'COMPLETED' }).eq('telegram_id', chatId).eq('full_number', num);
+
+                const cleanCode = extractOTP(otpFound.message || "");
+                const smsg = `✅ <b>OTP Received! (Manual)</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 <b>Number:</b> <code>${num}</code>\n🔑 <b>Code:</b> <code>${cleanCode}</code>`;
+                await bot.editMessageText(smsg, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' }).catch(()=>{});
+                
+                // ⚡ Next Number Fetch ⚡
+                let { data: act } = await supabase.from('active_numbers').select('range_prefix').eq('full_number', num).single();
+                let rangeToFetch = act ? act.range_prefix : u.saved_range;
+                if(rangeToFetch) await fetchNumberAction(chatId, rangeToFetch, settings, null);
+                return;
+            } else {
+                return bot.answerCallbackQuery(query.id, { text: `⏳ OTP not received yet. Wait a few seconds!`, show_alert: true });
+            }
+        } catch(e) {
+            return bot.answerCallbackQuery(query.id, { text: `❌ API Error while checking OTP.`, show_alert: true });
+        }
     }
 
     if (data === 'run_bcast') {
