@@ -3,7 +3,7 @@ import time
 import uuid
 import threading
 import requests
-from flask import Flask, request, redirect, render_template_string, send_from_directory
+from flask import Flask, request, redirect, render_template_string, send_from_directory, url_for
 
 # =========================================================
 # এই ৩টা ভ্যারিয়েবল Railway ড্যাশবোর্ড -> Variables ট্যাবে বসাও
@@ -31,13 +31,25 @@ PENDING = {}  # pending_id -> {"file_id":..., "name":..., "chat_id":..., "messag
 
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".3g2", ".ts", ".mpg", ".mpeg")
 
+# টেলিগ্রাম বট API (Local Bot API সার্ভার সেটআপ না করলে) দিয়ে ২০ এমবি-র বেশি
+# ফাইল ডাউনলোড করা যায় না — এটা কোডের বাগ না, টেলিগ্রামের নিজস্ব সীমা।
+TELEGRAM_MAX_DOWNLOAD = 20 * 1024 * 1024
+
+
+def safe_name(name):
+    """পাথ-ট্র্যাভার্সাল ঠেকাতে এবং সেভ-সেফ রাখতে ফাইলনেইম ক্লিন করা (বাংলা নাম ঠিক রেখেই)"""
+    name = os.path.basename((name or "").strip()) or f"file_{uuid.uuid4().hex[:8]}"
+    name = name.replace("/", "_").replace("\\", "_")
+    return name
+
+
 # ---------------------------------------------------------
 # ------------------- CloudConvert অংশ ---------------------
 # ---------------------------------------------------------
 # CloudConvert এখন সরাসরি "convert" অপারেশনে output_format=3gp সাপোর্ট করে না
-# (এই কারণেই "INVALID_CONVERSION_TYPE" এরর আসছিল)। তাই আমরা "command" অপারেশন
-# ব্যবহার করে সরাসরি ffmpeg কমান্ড চালাচ্ছি — এটা যেকোনো ভিডিও থেকে আসল 3GP
-# (H.263 ভিডিও + AAC অডিও, ছোট রেজোলিউশন) বানাতে পারে, বাটন ফোনের জন্য উপযুক্ত।
+# (এই কারণেই আগে "INVALID_CONVERSION_TYPE" এরর আসছিল)। তাই "command" অপারেশন
+# ব্যবহার করে সরাসরি ffmpeg কমান্ড চালানো হচ্ছে — H.263 ভিডিও + AAC অডিও,
+# ছোট রেজোলিউশন — আসল 3GP ফাইল, বাটন ফোনের উপযোগী।
 
 
 def cloudconvert_convert_to_3gp(input_path, filename):
@@ -109,7 +121,7 @@ def cloudconvert_convert_to_3gp(input_path, filename):
         raise RuntimeError("কনভার্সন হয়েছে কিন্তু কোনো আউটপুট ফাইল পাওয়া যায়নি")
     file_info = result_files[0]
     file_url = file_info["url"]
-    out_name = file_info.get("filename", out_filename)
+    out_name = safe_name(file_info.get("filename", out_filename))
 
     output_path = os.path.join(CONVERTED_FOLDER, out_name)
     dl = requests.get(file_url, timeout=600)
@@ -196,8 +208,17 @@ def send_document_to_telegram(chat_id, filepath):
 
 def download_telegram_file(file_id, save_as):
     r = requests.get(f"{TG_API}/getFile", params={"file_id": file_id}, timeout=30)
-    r.raise_for_status()
-    file_path = r.json()["result"]["file_path"]
+    data = r.json()
+    if not data.get("ok"):
+        desc = data.get("description", "")
+        if "too big" in desc.lower():
+            raise RuntimeError(
+                "ফাইলটি ২০ এমবি-র বেশি — টেলিগ্রামের স্ট্যান্ডার্ড Bot API দিয়ে এর বড় ফাইল "
+                "ডাউনলোড করা যায় না (এটা টেলিগ্রামের নিজস্ব সীমা, বটের কোডের সমস্যা না)। "
+                "ভিডিওটা কমপ্রেস করে বা ছোট করে পাঠাও।"
+            )
+        raise RuntimeError(f"getFile ব্যর্থ: {desc or 'অজানা কারণ'}")
+    file_path = data["result"]["file_path"]
     file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
     dl = requests.get(file_url, timeout=300)
     dl.raise_for_status()
@@ -207,7 +228,17 @@ def download_telegram_file(file_id, save_as):
     return save_path
 
 
-def handle_incoming_video(chat_id, file_id, orig_name):
+def handle_incoming_video(chat_id, file_id, orig_name, file_size):
+    if file_size and file_size > TELEGRAM_MAX_DOWNLOAD:
+        mb = round(file_size / (1024 * 1024), 1)
+        send_message(
+            chat_id,
+            f"⚠️ ভিডিওটি {mb}MB — টেলিগ্রামের স্ট্যান্ডার্ড বট API দিয়ে ২০MB-র বেশি ফাইল "
+            f"ডাউনলোড করা যায় না (এটা টেলিগ্রামের নিজস্ব সীমাবদ্ধতা)। ভিডিওটা কমপ্রেস করে বা "
+            f"ছোট রেজোলিউশনে পাঠালে সেভ হবে।"
+        )
+        return
+
     pending_id = uuid.uuid4().hex[:10]
     PENDING[pending_id] = {"file_id": file_id, "name": orig_name, "chat_id": chat_id}
     keyboard = {
@@ -244,10 +275,11 @@ def handle_callback(callback):
 
     if action == "save":
         try:
-            download_telegram_file(entry["file_id"], entry["name"])
-            text = f"✅ সেভ হয়েছে: {entry['name']}\nওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}"
+            save_name = safe_name(entry["name"])
+            download_telegram_file(entry["file_id"], save_name)
+            text = f"✅ সেভ হয়েছে: {save_name}\nওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}"
         except Exception as e:
-            text = f"⚠️ সেভ করতে সমস্যা হয়েছে: {e}"
+            text = f"⚠️ সেভ করতে সমস্যা হয়েছে:\n{e}"
     else:
         text = f"🗑 ডিলিট করা হয়েছে: {entry['name']}"
 
@@ -287,8 +319,10 @@ def telegram_polling_loop():
 
                 file_id = None
                 orig_name = None
+                file_size = None
                 if "video" in msg:
                     file_id = msg["video"]["file_id"]
+                    file_size = msg["video"].get("file_size")
                     orig_name = msg["video"].get("file_name") or f"video_{uuid.uuid4().hex[:8]}.mp4"
                 elif "document" in msg:
                     doc = msg["document"]
@@ -296,6 +330,7 @@ def telegram_polling_loop():
                     fname = doc.get("file_name", "")
                     if mime.startswith("video/") or fname.lower().endswith(VIDEO_EXTS):
                         file_id = doc["file_id"]
+                        file_size = doc.get("file_size")
                         orig_name = fname or f"video_{uuid.uuid4().hex[:8]}.mp4"
                     else:
                         send_message(chat_id, "শুধুমাত্র ভিডিও ফাইল সাপোর্টেড। অন্য কোনো ফাইল গ্রহণযোগ্য নয়।")
@@ -303,7 +338,7 @@ def telegram_polling_loop():
                     send_message(chat_id, f"স্বাগতম! একটি ভিডিও ফরওয়ার্ড করো, তারপর সেভ করে ওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}")
 
                 if file_id:
-                    handle_incoming_video(chat_id, file_id, orig_name)
+                    handle_incoming_video(chat_id, file_id, orig_name, file_size)
         except Exception:
             time.sleep(5)
 
@@ -311,176 +346,344 @@ def telegram_polling_loop():
 # ---------------------------------------------------------
 # ---------------------- Web রুট -----------------------------
 # ---------------------------------------------------------
-BASE_STYLE = """
+PAGE = r"""
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3GP Video Converter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#0b0d12; --bg2:#0f1218; --card:#151922; --card-border:#232838;
-    --accent:#6c8dff; --accent2:#a76bff; --text:#f2f4fa; --muted:#8a90a8;
-    --ok:#2fd189; --err:#ff5c7a; --warn:#f5b942;
+    --bg:#07080c; --panel:#12141c; --panel2:#171a24; --border:#242838;
+    --accent:#7c9bff; --accent2:#b56bff; --accent3:#4fd9c4;
+    --text:#f4f6fb; --muted:#8b90a6; --ok:#33d99a; --err:#ff5f7e;
   }
   *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
   body{
-    margin:0; padding:22px 14px 40px; color:var(--text);
+    color:var(--text); min-height:100vh; padding-bottom:50px;
+    font-family:'Inter','Hind Siliguri',-apple-system,sans-serif;
     background:
-      radial-gradient(1200px 500px at 20% -10%, rgba(108,141,255,.16), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(167,107,255,.14), transparent 55%),
+      radial-gradient(900px 480px at 15% -10%, rgba(124,155,255,.20), transparent 55%),
+      radial-gradient(800px 460px at 105% 5%, rgba(181,107,255,.16), transparent 55%),
+      radial-gradient(700px 400px at 50% 110%, rgba(79,217,196,.10), transparent 55%),
       var(--bg);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    min-height:100vh;
+    background-attachment:fixed;
   }
-  .wrap{max-width:480px;margin:0 auto}
-  .hero{
-    position:relative; overflow:hidden;
+  .topbar{
+    position:sticky; top:0; z-index:20; backdrop-filter:blur(14px);
+    background:rgba(7,8,12,.72); border-bottom:1px solid var(--border);
+    padding:14px 18px; display:flex; align-items:center; gap:10px;
+  }
+  .topbar .logo{
+    width:34px;height:34px;border-radius:10px;flex:none;
     background:linear-gradient(135deg,var(--accent),var(--accent2));
-    border-radius:20px; padding:22px 22px 20px; margin-bottom:22px;
-    box-shadow:0 12px 32px rgba(108,141,255,.28);
+    display:flex;align-items:center;justify-content:center;font-size:17px;
+    box-shadow:0 4px 14px rgba(124,155,255,.35);
   }
-  .hero::after{
-    content:""; position:absolute; right:-30px; top:-30px; width:140px; height:140px;
-    background:rgba(255,255,255,.12); border-radius:50%;
+  .topbar .title{font-weight:800; font-size:15px; letter-spacing:.2px}
+  .topbar .sub{font-size:11px; color:var(--muted)}
+
+  .wrap{max-width:520px;margin:0 auto;padding:20px 16px 0}
+
+  .hero{
+    position:relative; overflow:hidden; border-radius:22px;
+    padding:26px 22px 24px; margin-bottom:22px;
+    background:linear-gradient(150deg,#1c2140,#241a3d 55%,#12141c);
+    border:1px solid var(--border);
   }
-  .hero .icon{font-size:30px; margin-bottom:6px; display:block}
-  .hero h1{margin:0 0 4px;font-size:21px; letter-spacing:.2px}
-  .hero p{margin:0;font-size:13px;opacity:.92}
-  h2.section{font-size:12.5px;text-transform:uppercase;letter-spacing:.08em;
-    color:var(--muted);margin:24px 4px 10px;font-weight:700}
+  .hero::before{
+    content:""; position:absolute; inset:0;
+    background:radial-gradient(circle at 85% -20%, rgba(124,155,255,.35), transparent 55%);
+  }
+  .hero *{position:relative}
+  .hero .pill{
+    display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600;
+    color:var(--accent3); background:rgba(79,217,196,.12); border:1px solid rgba(79,217,196,.3);
+    padding:4px 10px; border-radius:999px; margin-bottom:12px;
+  }
+  .hero h1{margin:0 0 6px; font-size:23px; font-weight:800; letter-spacing:-.2px}
+  .hero p{margin:0; font-size:13.5px; color:var(--muted); line-height:1.5}
+
+  .dropzone{
+    border:1.5px dashed #38405a; border-radius:18px; padding:26px 18px;
+    text-align:center; background:var(--panel); margin-bottom:22px;
+    transition:border-color .18s ease, background .18s ease;
+    cursor:pointer;
+  }
+  .dropzone.drag{border-color:var(--accent); background:rgba(124,155,255,.06)}
+  .dropzone .dz-icon{font-size:30px; margin-bottom:6px}
+  .dropzone .dz-title{font-weight:700; font-size:14.5px; margin-bottom:3px}
+  .dropzone .dz-sub{font-size:12px; color:var(--muted); margin-bottom:14px}
+  .dropzone input[type=file]{display:none}
+  .filename-tag{
+    display:none; font-size:12px; background:var(--panel2); border:1px solid var(--border);
+    border-radius:10px; padding:8px 12px; margin:0 0 12px; word-break:break-all; text-align:left;
+  }
+  .btn{
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; border:none;
+    padding:11px 20px; border-radius:12px; font-size:13.5px; font-weight:700;
+    text-decoration:none; white-space:nowrap; display:inline-flex; align-items:center;
+    gap:6px; cursor:pointer; box-shadow:0 6px 18px rgba(124,155,255,.25);
+  }
+  .btn:disabled{opacity:.5; cursor:not-allowed}
+  .btn.dl{background:linear-gradient(135deg,var(--ok),#1fb583); box-shadow:0 6px 18px rgba(51,217,154,.25)}
+  .btn.block{width:100%; justify-content:center}
+  .btn.ghost{background:transparent; border:1px solid var(--border); box-shadow:none; color:var(--muted)}
+
+  .tabs{display:flex; gap:6px; background:var(--panel); border:1px solid var(--border);
+    padding:5px; border-radius:14px; margin-bottom:14px;}
+  .tab{
+    flex:1; text-align:center; padding:9px 4px; border-radius:10px; font-size:12.5px;
+    font-weight:700; color:var(--muted); cursor:pointer; user-select:none;
+    display:flex; align-items:center; justify-content:center; gap:5px;
+  }
+  .tab.active{background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff}
+  .tab .count{
+    font-size:10px; background:rgba(255,255,255,.15); border-radius:999px;
+    padding:1px 6px; min-width:16px;
+  }
+  .tab.active .count{background:rgba(255,255,255,.28)}
+
+  .panel{display:none}
+  .panel.active{display:block; animation:fade .2s ease}
+  @keyframes fade{from{opacity:0; transform:translateY(4px)} to{opacity:1; transform:none}}
+
   .card{
-    background:var(--card); border:1px solid var(--card-border);
-    border-radius:15px; padding:14px 16px; margin-bottom:10px;
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:16px; padding:13px 14px; margin-bottom:9px;
     display:flex; align-items:center; justify-content:space-between; gap:10px;
     transition:border-color .15s ease, transform .15s ease;
   }
   .card:hover{border-color:var(--accent); transform:translateY(-1px)}
-  .fname{font-size:13.5px; word-break:break-all; line-height:1.4; display:flex; align-items:center; gap:8px}
-  .fname .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
-  .empty{color:var(--muted); font-size:13px; padding:14px 4px; text-align:center;
-    border:1px dashed var(--card-border); border-radius:14px}
-  .btn{
-    background:var(--accent); color:#fff; border:none; padding:9px 16px;
-    border-radius:10px; font-size:13px; text-decoration:none; white-space:nowrap;
-    display:inline-block; cursor:pointer; font-weight:700;
+  .fname{font-size:13px; word-break:break-all; line-height:1.35; display:flex; align-items:center; gap:10px; min-width:0}
+  .fname .ico{
+    width:34px;height:34px;border-radius:10px;flex:none;
+    background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:15px;
   }
-  .btn.dl{background:var(--ok)}
-  form.upload{
-    background:linear-gradient(180deg, var(--card), var(--bg2));
-    border:1px dashed var(--card-border);
-    border-radius:16px; padding:18px; text-align:center; margin-bottom:8px;
-  }
-  form.upload .hint{font-size:12px;color:var(--muted);margin-bottom:10px}
-  input[type=file]{color:var(--muted); font-size:12px; width:100%; margin-bottom:12px}
+  .empty{color:var(--muted); font-size:12.5px; padding:26px 10px; text-align:center;
+    border:1px dashed var(--border); border-radius:16px; background:var(--panel)}
+  .empty .e-ico{font-size:26px; display:block; margin-bottom:6px; opacity:.6}
+
   .status-box{
-    text-align:center; padding:44px 18px; background:var(--card);
-    border:1px solid var(--card-border); border-radius:18px; margin-top:10px;
+    text-align:center; padding:48px 20px; background:var(--panel);
+    border:1px solid var(--border); border-radius:20px; margin-top:6px;
   }
   .spinner{
-    width:38px;height:38px;margin:0 auto 16px;border-radius:50%;
-    border:3px solid var(--card-border); border-top-color:var(--accent);
-    animation:spin 0.9s linear infinite;
+    width:40px;height:40px;margin:0 auto 18px;border-radius:50%;
+    border:3px solid var(--border); border-top-color:var(--accent);
+    animation:spin .85s linear infinite;
   }
   @keyframes spin{to{transform:rotate(360deg)}}
-  .status-box h3{margin:0 0 6px;font-size:17px}
-  .status-box p{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .status-box h3{margin:0 0 6px;font-size:18px}
+  .status-box p{color:var(--muted);font-size:13px;margin:0 0 20px}
   .status-box.err h3{color:var(--err)}
-  .status-box.err p{color:var(--text); background:#2a1620; padding:10px 12px;
-    border-radius:10px; text-align:left; word-break:break-word; font-size:12.5px}
+  .status-box.err p{color:var(--text); background:#241019; padding:12px 14px;
+    border-radius:12px; text-align:left; word-break:break-word; font-size:12.5px; white-space:pre-wrap}
   .status-box.ok h3{color:var(--ok)}
-  .back{display:block;text-align:center;margin-top:16px;color:var(--muted);font-size:13px;text-decoration:none}
+  .back{display:block;text-align:center;margin-top:18px;color:var(--muted);font-size:13px;text-decoration:none}
+
   .footer{
-    text-align:center; margin-top:34px; padding-top:16px;
-    border-top:1px solid var(--card-border); color:var(--muted); font-size:12px;
+    text-align:center; margin-top:36px; padding:22px 0 6px;
+    border-top:1px solid var(--border); color:var(--muted); font-size:12px;
   }
   .footer .badge{
-    display:inline-block; margin-top:6px; padding:5px 12px; border-radius:999px;
+    display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:7px 16px; border-radius:999px;
     background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff;
-    font-weight:700; font-size:11.5px; letter-spacing:.3px;
+    font-weight:800; font-size:12px; letter-spacing:.3px;
+    box-shadow:0 6px 16px rgba(124,155,255,.3);
   }
 </style>
-"""
-
-PAGE = """
-<!doctype html>
-<html lang="bn">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>3GP Video Converter</title>
-""" + BASE_STYLE + """
 </head>
 <body>
+
+<div class="topbar">
+  <div class="logo">🎬</div>
+  <div>
+    <div class="title">3GP Video Converter</div>
+    <div class="sub">smart · fast · feature-phone ready</div>
+  </div>
+</div>
+
 <div class="wrap">
   <div class="hero">
-    <span class="icon">🎬</span>
-    <h1>MP4 → 3GP Converter</h1>
-    <p>বাটন ফোনে চালানোর জন্য ভিডিও কনভার্ট করো — দ্রুত ও স্মার্ট</p>
+    <div class="pill">⚡ ffmpeg powered</div>
+    <h1>MP4 → 3GP কনভার্টার</h1>
+    <p>বাটন ফোনে চালানোর জন্য যেকোনো ভিডিওকে ছোট, কম্প্যাটিবল 3GP ফাইলে রূপান্তর করো — গ্যালারি থেকে আপলোড করো, অথবা টেলিগ্রাম বট থেকে সরাসরি সেভ করা ভিডিও কনভার্ট করো।</p>
   </div>
 
-  <form class="upload" method="POST" action="/upload" enctype="multipart/form-data">
-    <div class="hint">গ্যালারি থেকে যেকোনো ভিডিও ফাইল বেছে নাও</div>
-    <input type="file" name="file" accept="video/*" required>
-    <button class="btn" type="submit" style="width:100%">⬆️ নতুন ভিডিও আপলোড করো</button>
+  <form id="uploadForm" class="dropzone" method="POST" action="/upload" enctype="multipart/form-data">
+    <div class="dz-icon">📤</div>
+    <div class="dz-title">ভিডিও ড্র্যাগ করো অথবা ট্যাপ করে বেছে নাও</div>
+    <div class="dz-sub">গ্যালারি থেকে যেকোনো ভিডিও ফাইল সিলেক্ট করা যাবে</div>
+    <div class="filename-tag" id="fileTag"></div>
+    <label class="btn block" for="fileInput" id="pickBtn">📁 ফাইল বেছে নাও</label>
+    <input type="file" name="file" id="fileInput" accept="video/*" required>
+    <button class="btn block dl" type="submit" id="submitBtn" style="display:none;margin-top:10px">⬆️ আপলোড করো</button>
   </form>
 
-  <h2 class="section">📥 Telegram থেকে সেভ হওয়া ভিডিও</h2>
-  {% for f in telegram_files %}
-    <div class="card">
-      <span class="fname"><span class="dot"></span>{{ f }}</span>
-      <a class="btn" href="/convert/telegram/{{ f }}">কনভার্ট</a>
-    </div>
-  {% else %}
-    <div class="empty">এখনো কোনো ভিডিও নেই — বটে ভিডিও ফরওয়ার্ড করে "সেভ করুন" চাপো</div>
-  {% endfor %}
+  <div class="tabs">
+    <div class="tab active" data-tab="tg">📥 Telegram <span class="count">{{ telegram_files|length }}</span></div>
+    <div class="tab" data-tab="up">🗂️ আপলোড <span class="count">{{ uploaded_files|length }}</span></div>
+    <div class="tab" data-tab="done">✅ কনভার্টেড <span class="count">{{ converted_files|length }}</span></div>
+  </div>
 
-  <h2 class="section">🗂️ আপলোড করা ভিডিও</h2>
-  {% for f in uploaded_files %}
-    <div class="card">
-      <span class="fname"><span class="dot"></span>{{ f }}</span>
-      <a class="btn" href="/convert/upload/{{ f }}">কনভার্ট</a>
-    </div>
-  {% else %}
-    <div class="empty">কোনো ভিডিও নেই</div>
-  {% endfor %}
+  <div class="panel active" id="panel-tg">
+    {% for f in telegram_files %}
+      <div class="card">
+        <span class="fname"><span class="ico">🎬</span>{{ f }}</span>
+        <a class="btn" href="{{ url_for('convert', source='telegram', filename=f) }}">কনভার্ট</a>
+      </div>
+    {% else %}
+      <div class="empty"><span class="e-ico">📭</span>এখনো কোনো ভিডিও নেই — বটে ভিডিও ফরওয়ার্ড করে "সেভ করুন" চাপো</div>
+    {% endfor %}
+  </div>
 
-  <h2 class="section">✅ কনভার্ট হওয়া 3GP ফাইল</h2>
-  {% for f in converted_files %}
-    <div class="card">
-      <span class="fname"><span class="dot"></span>{{ f }}</span>
-      <a class="btn dl" href="/download/{{ f }}">ডাউনলোড</a>
-    </div>
-  {% else %}
-    <div class="empty">কোনো ফাইল নেই</div>
-  {% endfor %}
+  <div class="panel" id="panel-up">
+    {% for f in uploaded_files %}
+      <div class="card">
+        <span class="fname"><span class="ico">🎞️</span>{{ f }}</span>
+        <a class="btn" href="{{ url_for('convert', source='upload', filename=f) }}">কনভার্ট</a>
+      </div>
+    {% else %}
+      <div class="empty"><span class="e-ico">🗂️</span>কোনো ভিডিও নেই</div>
+    {% endfor %}
+  </div>
+
+  <div class="panel" id="panel-done">
+    {% for f in converted_files %}
+      <div class="card">
+        <span class="fname"><span class="ico">✅</span>{{ f }}</span>
+        <a class="btn dl" href="{{ url_for('download', filename=f) }}">ডাউনলোড</a>
+      </div>
+    {% else %}
+      <div class="empty"><span class="e-ico">📦</span>কোনো ফাইল নেই</div>
+    {% endfor %}
+  </div>
 
   <div class="footer">
     Smart video tools for feature phones
-    <div class="badge">Developed by TANVIR SIYAM</div>
+    <div class="badge">✨ Developed by TANVIR SIYAM</div>
   </div>
 </div>
+
+<script>
+  // ট্যাব সুইচিং
+  document.querySelectorAll('.tab').forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('panel-'+tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // ফাইল সিলেক্ট + ড্র্যাগড্রপ
+  const dz = document.getElementById('uploadForm');
+  const input = document.getElementById('fileInput');
+  const tag = document.getElementById('fileTag');
+  const pickBtn = document.getElementById('pickBtn');
+  const submitBtn = document.getElementById('submitBtn');
+
+  function showFile(file){
+    if(!file) return;
+    tag.textContent = '🎬 ' + file.name + '  (' + (file.size/1024/1024).toFixed(1) + ' MB)';
+    tag.style.display = 'block';
+    pickBtn.textContent = '🔁 অন্য ফাইল বেছে নাও';
+    submitBtn.style.display = 'flex';
+  }
+  input.addEventListener('change', ()=> showFile(input.files[0]));
+
+  ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev, e=>{
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, e=>{
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e=>{
+    const file = e.dataTransfer.files[0];
+    if(file){ input.files = e.dataTransfer.files; showFile(file); }
+  });
+  dz.addEventListener('submit', ()=>{
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '⏳ আপলোড হচ্ছে...';
+  });
+</script>
 </body>
 </html>
 """
 
-STATUS_PAGE = """
+STATUS_PAGE = r"""
 <!doctype html>
 <html lang="bn">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  {% if status not in ("finished", "error") %}<meta http-equiv="refresh" content="3">{% endif %}
-  <title>কনভার্ট হচ্ছে...</title>
-""" + BASE_STYLE + """
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if status not in ("finished", "error") %}<meta http-equiv="refresh" content="3">{% endif %}
+<title>কনভার্ট হচ্ছে...</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#07080c; --panel:#12141c; --border:#242838;
+    --accent:#7c9bff; --accent2:#b56bff; --text:#f4f6fb; --muted:#8b90a6;
+    --ok:#33d99a; --err:#ff5f7e;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:26px 16px 40px; color:var(--text); min-height:100vh;
+    font-family:'Inter','Hind Siliguri',-apple-system,sans-serif;
+    background:
+      radial-gradient(900px 480px at 15% -10%, rgba(124,155,255,.20), transparent 55%),
+      radial-gradient(800px 460px at 105% 5%, rgba(181,107,255,.16), transparent 55%),
+      var(--bg);
+  }
+  .wrap{max-width:460px;margin:0 auto}
+  .status-box{
+    text-align:center; padding:48px 20px; background:var(--panel);
+    border:1px solid var(--border); border-radius:22px; margin-top:20px;
+  }
+  .spinner{
+    width:42px;height:42px;margin:0 auto 18px;border-radius:50%;
+    border:3px solid var(--border); border-top-color:var(--accent);
+    animation:spin .85s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .status-box h3{margin:0 0 6px;font-size:18px}
+  .status-box p{color:var(--muted);font-size:13px;margin:0 0 20px}
+  .status-box.err h3{color:var(--err)}
+  .status-box.err p{color:var(--text); background:#241019; padding:12px 14px;
+    border-radius:12px; text-align:left; word-break:break-word; font-size:12.5px; white-space:pre-wrap}
+  .status-box.ok h3{color:var(--ok)}
+  .btn{
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; border:none;
+    padding:11px 20px; border-radius:12px; font-size:13.5px; font-weight:700;
+    text-decoration:none; display:inline-block;
+  }
+  .back{display:block;text-align:center;margin-top:18px;color:var(--muted);font-size:13px;text-decoration:none}
+  .footer{text-align:center;margin-top:30px;color:var(--muted);font-size:12px}
+  .badge{
+    display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:7px 16px; border-radius:999px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff;
+    font-weight:800; font-size:12px;
+  }
+</style>
 </head>
 <body>
 <div class="wrap">
   {% if status == "finished" %}
     <div class="status-box ok">
-      <div style="font-size:40px;margin-bottom:10px">✅</div>
+      <div style="font-size:42px;margin-bottom:10px">✅</div>
       <h3>কনভার্সন শেষ!</h3>
       <p>তোমার 3GP ফাইল তৈরি হয়ে গেছে</p>
-      <a class="btn dl" href="/download/{{ output }}">⬇️ ডাউনলোড করো</a>
+      <a class="btn" href="{{ url_for('download', filename=output) }}">⬇️ ডাউনলোড করো</a>
     </div>
   {% elif status == "error" %}
     <div class="status-box err">
-      <div style="font-size:40px;margin-bottom:10px">⚠️</div>
+      <div style="font-size:42px;margin-bottom:10px">⚠️</div>
       <h3>কনভার্সন ব্যর্থ হয়েছে</h3>
       <p>{{ error }}</p>
     </div>
@@ -491,10 +694,8 @@ STATUS_PAGE = """
       <p>পেজটা এমনিতেই রিফ্রেশ হবে, একটু অপেক্ষা করো</p>
     </div>
   {% endif %}
-  <a class="back" href="/">← হোমে ফিরে যাও</a>
-  <div class="footer">
-    <div class="badge">Developed by TANVIR SIYAM</div>
-  </div>
+  <a class="back" href="{{ url_for('home') }}">← হোমে ফিরে যাও</a>
+  <div class="footer"><div class="badge">✨ Developed by TANVIR SIYAM</div></div>
 </div>
 </body>
 </html>
@@ -514,9 +715,10 @@ def home():
 @app.route("/upload", methods=["POST"])
 def upload():
     f = request.files["file"]
-    save_path = os.path.join(UPLOAD_FOLDER, f.filename)
+    fname = safe_name(f.filename)
+    save_path = os.path.join(UPLOAD_FOLDER, fname)
     f.save(save_path)
-    return redirect("/")
+    return redirect(url_for("home"))
 
 
 @app.route("/convert/<source>/<path:filename>")
@@ -533,7 +735,7 @@ def convert(source, filename):
     thread = threading.Thread(target=background_convert, args=(job_id, input_path, filename, send_to_tg))
     thread.start()
 
-    return redirect(f"/status/{job_id}")
+    return redirect(url_for("status", job_id=job_id))
 
 
 @app.route("/status/<job_id>")
