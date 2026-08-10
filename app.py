@@ -3,7 +3,7 @@ import time
 import uuid
 import threading
 import requests
-from flask import Flask, request, redirect, render_template_string, send_from_directory, jsonify
+from flask import Flask, request, redirect, render_template_string, send_from_directory
 
 # =========================================================
 # এই ৩টা ভ্যারিয়েবল Railway ড্যাশবোর্ড -> Variables ট্যাবে বসাও
@@ -27,11 +27,17 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB আপলোড �
 
 JOBS = {}  # job_id -> {"status": "...", "output": "filename বা None", "error": "..."}
 LAST_CHAT_ID = {"id": None}  # শেষ যে ইউজার বটে মেসেজ পাঠিয়েছে তার chat_id (সিঙ্গেল-ইউজার সিস্টেম বলে ধরে নেওয়া হচ্ছে)
+PENDING = {}  # pending_id -> {"file_id":..., "name":..., "chat_id":..., "message_id":...}
+
+VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".3g2", ".ts", ".mpg", ".mpeg")
 
 # ---------------------------------------------------------
 # ------------------- CloudConvert অংশ ---------------------
 # ---------------------------------------------------------
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+# CloudConvert এখন সরাসরি "convert" অপারেশনে output_format=3gp সাপোর্ট করে না
+# (এই কারণেই "INVALID_CONVERSION_TYPE" এরর আসছিল)। তাই আমরা "command" অপারেশন
+# ব্যবহার করে সরাসরি ffmpeg কমান্ড চালাচ্ছি — এটা যেকোনো ভিডিও থেকে আসল 3GP
+# (H.263 ভিডিও + AAC অডিও, ছোট রেজোলিউশন) বানাতে পারে, বাটন ফোনের জন্য উপযুক্ত।
 
 
 def cloudconvert_convert_to_3gp(input_path, filename):
@@ -39,29 +45,30 @@ def cloudconvert_convert_to_3gp(input_path, filename):
         raise RuntimeError("CLOUDCONVERT_API_KEY সেট করা হয়নি (Railway Variables-এ যোগ করো)")
 
     headers = {"Authorization": f"Bearer {CLOUDCONVERT_API_KEY}"}
-    ext = os.path.splitext(filename)[1].lower()
-    is_image = ext in IMAGE_EXTS
+    safe_stem = os.path.splitext(filename)[0] or "video"
+    out_filename = f"{safe_stem}_{uuid.uuid4().hex[:6]}.3gp"
 
-    convert_task = {
-        "operation": "convert",
-        "input": "upload-file",
-        "output_format": "3gp",
-        "engine": "ffmpeg",
-    }
-    if is_image:
-        # ছবি থেকে ভিডিও বানাতে হলে input_format ও duration (সেকেন্ড) লাগবে,
-        # নাহলে CloudConvert টাস্কটা error দিয়ে ফেল করায়
-        convert_task["input_format"] = ext.lstrip(".")
-        convert_task["duration"] = 5
+    ffmpeg_args = (
+        f"-i /input/upload-file/{filename} "
+        f"-vf scale=176:144 -vcodec h263 -b:v 128k -r 15 "
+        f"-acodec aac -ar 8000 -ac 1 -b:a 32k "
+        f"-y /output/{out_filename}"
+    )
 
     job_payload = {
         "tasks": {
             "upload-file": {"operation": "import/upload"},
-            "convert-file": convert_task,
+            "convert-file": {
+                "operation": "command",
+                "input": "upload-file",
+                "engine": "ffmpeg",
+                "command": "ffmpeg",
+                "arguments": ffmpeg_args,
+            },
             "export-file": {
                 "operation": "export/url",
-                "input": "convert-file"
-            }
+                "input": "convert-file",
+            },
         }
     }
 
@@ -88,7 +95,6 @@ def cloudconvert_convert_to_3gp(input_path, filename):
             break
 
     if job["status"] == "error":
-        # আসল কারণটা বের করে আনা — কোন টাস্ক কেন ব্যর্থ হলো, CloudConvert নিজেই তা বলে দেয়
         failed_tasks = [t for t in job["tasks"] if t["status"] == "error"]
         if failed_tasks:
             t = failed_tasks[0]
@@ -98,17 +104,20 @@ def cloudconvert_convert_to_3gp(input_path, filename):
         raise RuntimeError("CloudConvert job ব্যর্থ হয়েছে, কিন্তু কারণ পাওয়া যায়নি")
 
     export_task = next(t for t in job["tasks"] if t["name"] == "export-file")
-    file_info = export_task["result"]["files"][0]
+    result_files = export_task["result"]["files"]
+    if not result_files:
+        raise RuntimeError("কনভার্সন হয়েছে কিন্তু কোনো আউটপুট ফাইল পাওয়া যায়নি")
+    file_info = result_files[0]
     file_url = file_info["url"]
-    out_filename = file_info["filename"]
+    out_name = file_info.get("filename", out_filename)
 
-    output_path = os.path.join(CONVERTED_FOLDER, out_filename)
+    output_path = os.path.join(CONVERTED_FOLDER, out_name)
     dl = requests.get(file_url, timeout=600)
     dl.raise_for_status()
     with open(output_path, "wb") as f:
         f.write(dl.content)
 
-    return out_filename
+    return out_name
 
 
 def background_convert(job_id, input_path, filename, send_to_telegram):
@@ -144,9 +153,32 @@ def set_menu_button():
         pass
 
 
-def send_message(chat_id, text):
+def send_message(chat_id, text, reply_markup=None):
     try:
-        requests.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=15)
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        r = requests.post(f"{TG_API}/sendMessage", json=payload, timeout=15)
+        return r.json().get("result")
+    except Exception:
+        return None
+
+
+def edit_message(chat_id, message_id, text):
+    try:
+        requests.post(f"{TG_API}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id, "text": text
+        }, timeout=15)
+    except Exception:
+        pass
+
+
+def answer_callback_query(callback_id, text=None):
+    try:
+        payload = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text
+        requests.post(f"{TG_API}/answerCallbackQuery", json=payload, timeout=15)
     except Exception:
         pass
 
@@ -175,6 +207,57 @@ def download_telegram_file(file_id, save_as):
     return save_path
 
 
+def handle_incoming_video(chat_id, file_id, orig_name):
+    pending_id = uuid.uuid4().hex[:10]
+    PENDING[pending_id] = {"file_id": file_id, "name": orig_name, "chat_id": chat_id}
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ সেভ করুন", "callback_data": f"save:{pending_id}"},
+            {"text": "🗑 ডিলিট করুন", "callback_data": f"del:{pending_id}"},
+        ]]
+    }
+    msg = send_message(chat_id, f"🎬 ভিডিও পাওয়া গেছে: {orig_name}\nসেভ করবে নাকি ডিলিট করবে?", reply_markup=keyboard)
+    if msg:
+        PENDING[pending_id]["message_id"] = msg.get("message_id")
+
+
+def handle_callback(callback):
+    cq_id = callback["id"]
+    data = callback.get("data", "")
+    msg = callback.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
+
+    if ":" not in data:
+        answer_callback_query(cq_id)
+        return
+
+    action, pending_id = data.split(":", 1)
+    entry = PENDING.pop(pending_id, None)
+
+    if not entry:
+        answer_callback_query(cq_id, "এই রিকোয়েস্টের মেয়াদ শেষ হয়ে গেছে")
+        return
+
+    target_chat_id = chat_id or entry["chat_id"]
+    target_message_id = message_id or entry.get("message_id")
+
+    if action == "save":
+        try:
+            download_telegram_file(entry["file_id"], entry["name"])
+            text = f"✅ সেভ হয়েছে: {entry['name']}\nওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}"
+        except Exception as e:
+            text = f"⚠️ সেভ করতে সমস্যা হয়েছে: {e}"
+    else:
+        text = f"🗑 ডিলিট করা হয়েছে: {entry['name']}"
+
+    if target_message_id:
+        edit_message(target_chat_id, target_message_id, text)
+    else:
+        send_message(target_chat_id, text)
+    answer_callback_query(cq_id)
+
+
 def telegram_polling_loop():
     set_menu_button()
     offset = None
@@ -187,6 +270,15 @@ def telegram_polling_loop():
             data = r.json()
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
+
+                callback = update.get("callback_query")
+                if callback:
+                    chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    if chat_id:
+                        LAST_CHAT_ID["id"] = chat_id
+                    handle_callback(callback)
+                    continue
+
                 msg = update.get("message")
                 if not msg:
                     continue
@@ -197,22 +289,21 @@ def telegram_polling_loop():
                 orig_name = None
                 if "video" in msg:
                     file_id = msg["video"]["file_id"]
-                    orig_name = f"video_{uuid.uuid4().hex[:8]}.mp4"
+                    orig_name = msg["video"].get("file_name") or f"video_{uuid.uuid4().hex[:8]}.mp4"
                 elif "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                    orig_name = msg["document"].get("file_name", f"doc_{uuid.uuid4().hex[:8]}")
-                elif "photo" in msg:
-                    file_id = msg["photo"][-1]["file_id"]
-                    orig_name = f"photo_{uuid.uuid4().hex[:8]}.jpg"
+                    doc = msg["document"]
+                    mime = doc.get("mime_type", "")
+                    fname = doc.get("file_name", "")
+                    if mime.startswith("video/") or fname.lower().endswith(VIDEO_EXTS):
+                        file_id = doc["file_id"]
+                        orig_name = fname or f"video_{uuid.uuid4().hex[:8]}.mp4"
+                    else:
+                        send_message(chat_id, "শুধুমাত্র ভিডিও ফাইল সাপোর্টেড। অন্য কোনো ফাইল গ্রহণযোগ্য নয়।")
                 elif "text" in msg and msg["text"] == "/start":
-                    send_message(chat_id, f"স্বাগতম! ফাইল ফরওয়ার্ড করো, তারপর ওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}")
+                    send_message(chat_id, f"স্বাগতম! একটি ভিডিও ফরওয়ার্ড করো, তারপর সেভ করে ওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}")
 
                 if file_id:
-                    try:
-                        download_telegram_file(file_id, orig_name)
-                        send_message(chat_id, f"ফাইল সেভ হয়েছে: {orig_name}\nওয়েবসাইটে গিয়ে কনভার্ট করো:\n{WEBSITE_URL}")
-                    except Exception as e:
-                        send_message(chat_id, f"ফাইল সেভ করতে সমস্যা হয়েছে: {e}")
+                    handle_incoming_video(chat_id, file_id, orig_name)
         except Exception:
             time.sleep(5)
 
@@ -223,50 +314,66 @@ def telegram_polling_loop():
 BASE_STYLE = """
 <style>
   :root{
-    --bg:#0f1115; --card:#171a21; --card-border:#262b36;
-    --accent:#5b8def; --accent2:#7c5cff; --text:#eef1f7; --muted:#8a90a2;
-    --ok:#35c98d; --err:#ff5c7a; --warn:#f5a623;
+    --bg:#0b0d12; --bg2:#0f1218; --card:#151922; --card-border:#232838;
+    --accent:#6c8dff; --accent2:#a76bff; --text:#f2f4fa; --muted:#8a90a8;
+    --ok:#2fd189; --err:#ff5c7a; --warn:#f5b942;
   }
   *{box-sizing:border-box}
   body{
-    margin:0; padding:20px 14px 60px; background:var(--bg); color:var(--text);
+    margin:0; padding:22px 14px 40px; color:var(--text);
+    background:
+      radial-gradient(1200px 500px at 20% -10%, rgba(108,141,255,.16), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(167,107,255,.14), transparent 55%),
+      var(--bg);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
   }
   .wrap{max-width:480px;margin:0 auto}
   .hero{
+    position:relative; overflow:hidden;
     background:linear-gradient(135deg,var(--accent),var(--accent2));
-    border-radius:16px; padding:18px 20px; margin-bottom:20px;
-    box-shadow:0 8px 24px rgba(91,141,239,.25);
+    border-radius:20px; padding:22px 22px 20px; margin-bottom:22px;
+    box-shadow:0 12px 32px rgba(108,141,255,.28);
   }
-  .hero h1{margin:0 0 4px;font-size:20px}
-  .hero p{margin:0;font-size:13px;opacity:.9}
-  h2.section{font-size:13px;text-transform:uppercase;letter-spacing:.06em;
-    color:var(--muted);margin:22px 2px 8px;font-weight:600}
+  .hero::after{
+    content:""; position:absolute; right:-30px; top:-30px; width:140px; height:140px;
+    background:rgba(255,255,255,.12); border-radius:50%;
+  }
+  .hero .icon{font-size:30px; margin-bottom:6px; display:block}
+  .hero h1{margin:0 0 4px;font-size:21px; letter-spacing:.2px}
+  .hero p{margin:0;font-size:13px;opacity:.92}
+  h2.section{font-size:12.5px;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--muted);margin:24px 4px 10px;font-weight:700}
   .card{
     background:var(--card); border:1px solid var(--card-border);
-    border-radius:14px; padding:14px 16px; margin-bottom:10px;
+    border-radius:15px; padding:14px 16px; margin-bottom:10px;
     display:flex; align-items:center; justify-content:space-between; gap:10px;
+    transition:border-color .15s ease, transform .15s ease;
   }
-  .fname{font-size:14px; word-break:break-all; line-height:1.4}
-  .empty{color:var(--muted); font-size:13px; padding:10px 4px}
+  .card:hover{border-color:var(--accent); transform:translateY(-1px)}
+  .fname{font-size:13.5px; word-break:break-all; line-height:1.4; display:flex; align-items:center; gap:8px}
+  .fname .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+  .empty{color:var(--muted); font-size:13px; padding:14px 4px; text-align:center;
+    border:1px dashed var(--card-border); border-radius:14px}
   .btn{
     background:var(--accent); color:#fff; border:none; padding:9px 16px;
-    border-radius:9px; font-size:13px; text-decoration:none; white-space:nowrap;
-    display:inline-block; cursor:pointer; font-weight:600;
+    border-radius:10px; font-size:13px; text-decoration:none; white-space:nowrap;
+    display:inline-block; cursor:pointer; font-weight:700;
   }
   .btn.dl{background:var(--ok)}
-  .btn.ghost{background:transparent;border:1px solid var(--card-border);color:var(--text)}
   form.upload{
-    background:var(--card); border:1px dashed var(--card-border);
-    border-radius:14px; padding:16px; text-align:center; margin-bottom:8px;
+    background:linear-gradient(180deg, var(--card), var(--bg2));
+    border:1px dashed var(--card-border);
+    border-radius:16px; padding:18px; text-align:center; margin-bottom:8px;
   }
-  input[type=file]{color:var(--muted); font-size:12px; width:100%; margin-bottom:10px}
+  form.upload .hint{font-size:12px;color:var(--muted);margin-bottom:10px}
+  input[type=file]{color:var(--muted); font-size:12px; width:100%; margin-bottom:12px}
   .status-box{
-    text-align:center; padding:40px 16px; background:var(--card);
-    border:1px solid var(--card-border); border-radius:16px; margin-top:10px;
+    text-align:center; padding:44px 18px; background:var(--card);
+    border:1px solid var(--card-border); border-radius:18px; margin-top:10px;
   }
   .spinner{
-    width:36px;height:36px;margin:0 auto 16px;border-radius:50%;
+    width:38px;height:38px;margin:0 auto 16px;border-radius:50%;
     border:3px solid var(--card-border); border-top-color:var(--accent);
     animation:spin 0.9s linear infinite;
   }
@@ -275,9 +382,18 @@ BASE_STYLE = """
   .status-box p{color:var(--muted);font-size:13px;margin:0 0 18px}
   .status-box.err h3{color:var(--err)}
   .status-box.err p{color:var(--text); background:#2a1620; padding:10px 12px;
-    border-radius:8px; text-align:left; word-break:break-word; font-size:12.5px}
+    border-radius:10px; text-align:left; word-break:break-word; font-size:12.5px}
   .status-box.ok h3{color:var(--ok)}
   .back{display:block;text-align:center;margin-top:16px;color:var(--muted);font-size:13px;text-decoration:none}
+  .footer{
+    text-align:center; margin-top:34px; padding-top:16px;
+    border-top:1px solid var(--card-border); color:var(--muted); font-size:12px;
+  }
+  .footer .badge{
+    display:inline-block; margin-top:6px; padding:5px 12px; border-radius:999px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff;
+    font-weight:700; font-size:11.5px; letter-spacing:.3px;
+  }
 </style>
 """
 
@@ -287,50 +403,57 @@ PAGE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>3GP Converter</title>
+  <title>3GP Video Converter</title>
 """ + BASE_STYLE + """
 </head>
 <body>
 <div class="wrap">
   <div class="hero">
-    <h1>📼 MP4 / JPG → 3GP</h1>
-    <p>বাটন ফোনে চালানোর জন্য ভিডিও/ছবি কনভার্ট করো</p>
+    <span class="icon">🎬</span>
+    <h1>MP4 → 3GP Converter</h1>
+    <p>বাটন ফোনে চালানোর জন্য ভিডিও কনভার্ট করো — দ্রুত ও স্মার্ট</p>
   </div>
 
   <form class="upload" method="POST" action="/upload" enctype="multipart/form-data">
-    <input type="file" name="file" accept="video/*,image/*" required>
-    <button class="btn" type="submit" style="width:100%">⬆️ নতুন ফাইল আপলোড করো</button>
+    <div class="hint">গ্যালারি থেকে যেকোনো ভিডিও ফাইল বেছে নাও</div>
+    <input type="file" name="file" accept="video/*" required>
+    <button class="btn" type="submit" style="width:100%">⬆️ নতুন ভিডিও আপলোড করো</button>
   </form>
 
-  <h2 class="section">📥 Telegram থেকে সেভ হওয়া ফাইল</h2>
+  <h2 class="section">📥 Telegram থেকে সেভ হওয়া ভিডিও</h2>
   {% for f in telegram_files %}
     <div class="card">
-      <span class="fname">{{ f }}</span>
+      <span class="fname"><span class="dot"></span>{{ f }}</span>
       <a class="btn" href="/convert/telegram/{{ f }}">কনভার্ট</a>
     </div>
   {% else %}
-    <div class="empty">এখনো কোনো ফাইল নেই — বটে ভিডিও/ছবি ফরওয়ার্ড করো</div>
+    <div class="empty">এখনো কোনো ভিডিও নেই — বটে ভিডিও ফরওয়ার্ড করে "সেভ করুন" চাপো</div>
   {% endfor %}
 
-  <h2 class="section">🗂️ আপলোড করা ফাইল</h2>
+  <h2 class="section">🗂️ আপলোড করা ভিডিও</h2>
   {% for f in uploaded_files %}
     <div class="card">
-      <span class="fname">{{ f }}</span>
+      <span class="fname"><span class="dot"></span>{{ f }}</span>
       <a class="btn" href="/convert/upload/{{ f }}">কনভার্ট</a>
     </div>
   {% else %}
-    <div class="empty">কোনো ফাইল নেই</div>
+    <div class="empty">কোনো ভিডিও নেই</div>
   {% endfor %}
 
   <h2 class="section">✅ কনভার্ট হওয়া 3GP ফাইল</h2>
   {% for f in converted_files %}
     <div class="card">
-      <span class="fname">{{ f }}</span>
+      <span class="fname"><span class="dot"></span>{{ f }}</span>
       <a class="btn dl" href="/download/{{ f }}">ডাউনলোড</a>
     </div>
   {% else %}
     <div class="empty">কোনো ফাইল নেই</div>
   {% endfor %}
+
+  <div class="footer">
+    Smart video tools for feature phones
+    <div class="badge">Developed by TANVIR SIYAM</div>
+  </div>
 </div>
 </body>
 </html>
@@ -369,6 +492,9 @@ STATUS_PAGE = """
     </div>
   {% endif %}
   <a class="back" href="/">← হোমে ফিরে যাও</a>
+  <div class="footer">
+    <div class="badge">Developed by TANVIR SIYAM</div>
+  </div>
 </div>
 </body>
 </html>
