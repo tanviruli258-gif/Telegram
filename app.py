@@ -11,7 +11,7 @@ from flask import Flask, request, redirect, render_template_string, send_from_di
 CLOUDCONVERT_API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiOTQ1ODRjMjg0ZGExZjY5NzE2ZjIxMTJjNjZkOTMzMGE2YTNjNGU2ZWExNDgxZTFkM2MwZGIxN2UyNWI2MzgxNGY5M2U1YzVkZDFiMDRjM2YiLCJpYXQiOjE3ODYzNDg2MzQuNDQ4OTIsIm5iZiI6MTc4NjM0ODYzNC40NDg5MjEsImV4cCI6NDk0MjAyMjIzNC40NDAxNzYsInN1YiI6Ijc2NTczMTUxIiwic2NvcGVzIjpbInVzZXIucmVhZCIsInVzZXIud3JpdGUiLCJ0YXNrLnJlYWQiLCJ3ZWJob29rLnJlYWQiLCJ0YXNrLndyaXRlIiwid2ViaG9vay53cml0ZSIsInByZXNldC5yZWFkIiwicHJlc2V0LndyaXRlIl19.o_GpsGUNiniAcpF-MmpknLvIsQTplEk1GZIIzm0nLalLjhEzN4t2lUE9Hz8ZxcKnA4CVcO1vwyJ932bTEc2dC8VKa1JcBx1idBKA3epIHeWnhCyzKlerYZU_CI69nGY5ZSyEXhZmSyN8osgOy2UpdAZx2Tn-_DhNVbGAE7GZUabC1TOzctjO78wzWnoF7u0gkKNBJccacjR-xvlhqyz31kE0N5x7MpOrceCHdlrlbR1E8Cc2k0rKO4LB43TaOymqolNAHY5yxvpq01jTEDOgBglVyzAE09HcbbmiWtEESSxR4OBBOLAwA8jQMRJV3XZ6uBIy_yEUDsM5TULp_qopapDkpIjFZAoNuYy5HlhduZ7F9YXd2q1zsmt8ldJYM61_Y8H550imQSpvXKS4j4dL4Zzc0BIIuXIZAonpDsZ1_1s6ujELWxFus9Igu0QeQZMgjWQTuFK_eVLSHwJI_KjO3QCKGU6QSnUNhLiC36jjZm6Jsi0dc4A2dw-mKIlIHNje4XVmXu2JviVA3UnypNzm15_iw0iyG6gFNJVCiyrAc9uBCaaFEYgYhKWkJpFtHxMFleYKXBTve8kQ1NgSo_9fWy_aaZscbniVSGvezjE4AU7Cf_DH2__oHOE_6ZU4Q-ODrZGukFvr8en6GpKqM605uERW12djkU1TU2g4NeU0lOA"
 TELEGRAM_BOT_TOKEN = "7685589352:AAF9FMVJmZMLiQZhgINOMn9DAt3g_alQR6Y"
 # Railway থেকে পাওয়া তোমার সাইটের পাবলিক URL, যেমন: https://myapp-production.up.railway.app
-WEBSITE_URL = "PASTE_YOUR_RAILWAY_PUBLIC_URL_HERE"
+WEBSITE_URL = "https://web-production-ed0a9.up.railway.app/"
 # =========================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
