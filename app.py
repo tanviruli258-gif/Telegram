@@ -384,8 +384,8 @@ def handle_incoming_video(chat_id, file_id, orig_name, file_size):
     pending_id = uuid.uuid4().hex[:10]
     PENDING[pending_id] = {"file_id": file_id, "name": orig_name, "chat_id": chat_id, "size": file_size}
     keyboard = {"inline_keyboard": [[
-        {"text": "✅ SAVE", "callback_data": f"save:{pending_id}"},
-        {"text": "🗑️ DELETE", "callback_data": f"del:{pending_id}"},
+        {"text": "✅ সেভ করুন", "callback_data": f"save:{pending_id}"},
+        {"text": "🗑 ডিলিট করুন", "callback_data": f"del:{pending_id}"},
     ]]}
     msg = send_message(chat_id, f"🎬 ভিডিও পাওয়া গেছে: {orig_name}\nসেভ করবে নাকি ডিলিট করবে?", reply_markup=keyboard)
     if msg:
@@ -622,40 +622,44 @@ PAGE = r"""
 <title>3GP/MP3 Converter</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Hind+Siliguri:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#0a0c14; --panel:rgba(255,255,255,.045); --panel2:rgba(255,255,255,.065); --border:rgba(255,255,255,.09);
-    --border-hi:rgba(255,255,255,.16);
-    --accent:#6f8dff; --accent2:#a76bf0; --accent3:#3fd6c6;
+    --bg:#0a0c16; --panel:rgba(255,255,255,.05); --panel2:rgba(255,255,255,.075); --border:rgba(255,255,255,.1);
+    --border-hi:rgba(255,255,255,.2);
+    --accent:#6f8dff; --accent2:#a76bf0; --accent3:#3fd6c6; --accent4:#ff7ab8;
     --text:#f5f7fc; --muted:#9298b0; --ok:#2fd897; --err:#ff6480;
-    --glass:rgba(20,22,34,.55); --glass-hi:rgba(255,255,255,.06);
+    --glass:rgba(24,26,40,.42); --glass-hi:rgba(255,255,255,.07);
     --navh:72px;
-    --shadow-glass:0 8px 32px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+    --shadow-glass:0 8px 32px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.08);
+    --grad-full:linear-gradient(135deg,var(--accent),var(--accent2) 50%,var(--accent3));
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
   html,body{margin:0;padding:0}
   body{
     color:var(--text); min-height:100vh;
-    font-family:'Inter','Hind Siliguri',-apple-system,sans-serif;
+    font-family:'Plus Jakarta Sans','Hind Siliguri','Inter',-apple-system,sans-serif;
     background:
-      radial-gradient(1000px 560px at 12% -12%, rgba(111,141,255,.24), transparent 55%),
-      radial-gradient(900px 520px at 108% 0%, rgba(167,107,240,.18), transparent 55%),
-      radial-gradient(800px 460px at 50% 115%, rgba(63,214,198,.12), transparent 55%),
-      linear-gradient(180deg,#0b0d16,#07080f 60%,#060710);
+      radial-gradient(1000px 560px at 8% -12%, rgba(111,141,255,.32), transparent 55%),
+      radial-gradient(900px 520px at 105% 0%, rgba(167,107,240,.28), transparent 55%),
+      radial-gradient(800px 460px at 92% 60%, rgba(255,122,184,.14), transparent 55%),
+      radial-gradient(900px 520px at 50% 118%, rgba(63,214,198,.2), transparent 55%),
+      linear-gradient(160deg,#10122099,#0a0c1699 45%,#07080f99),
+      linear-gradient(180deg,#12142a,#0b0d1a 55%,#07080f);
     background-attachment:fixed;
     padding-bottom:calc(var(--navh) + 26px);
   }
   .topbar{
-    position:sticky; top:0; z-index:20; backdrop-filter:blur(20px) saturate(150%);
-    -webkit-backdrop-filter:blur(20px) saturate(150%);
-    background:rgba(9,10,17,.62); border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:20; backdrop-filter:blur(22px) saturate(180%);
+    -webkit-backdrop-filter:blur(22px) saturate(180%);
+    background:linear-gradient(120deg,rgba(111,141,255,.1),rgba(167,107,240,.08)), rgba(9,10,17,.5);
+    border-bottom:1px solid var(--border);
     padding:14px 18px; display:flex; align-items:center; gap:11px;
-    box-shadow:0 1px 0 rgba(255,255,255,.04);
+    box-shadow:0 1px 0 rgba(255,255,255,.05);
   }
   .topbar .logo{
     width:36px;height:36px;border-radius:11px;flex:none;
-    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    background:var(--grad-full);
     display:flex;align-items:center;justify-content:center;font-size:17px;
     box-shadow:0 6px 16px rgba(111,141,255,.4), inset 0 1px 0 rgba(255,255,255,.35);
     border:1px solid rgba(255,255,255,.18);
@@ -719,7 +723,7 @@ PAGE = r"""
   .source-btn{flex:1; background:transparent; border:1px solid transparent; border-radius:12px;
     padding:13px 8px; text-align:center; font-size:12.5px; font-weight:700; cursor:pointer; color:var(--muted);
     transition:all .2s cubic-bezier(.4,0,.2,1);}
-  .source-btn.active{background:linear-gradient(135deg,var(--accent),var(--accent2)); border-color:rgba(255,255,255,.18); color:#fff;
+  .source-btn.active{background:var(--grad-full); border-color:rgba(255,255,255,.18); color:#fff;
     box-shadow:0 6px 16px rgba(111,141,255,.32), inset 0 1px 0 rgba(255,255,255,.25); transform:translateY(-1px)}
   .source-btn .ic{font-size:20px; display:block; margin-bottom:4px}
 
@@ -750,14 +754,14 @@ PAGE = r"""
   .fmt-btn{flex:1; background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:16px;
     padding:17px 8px; text-align:center; cursor:pointer; transition:all .2s cubic-bezier(.4,0,.2,1);}
   .fmt-btn:hover{border-color:var(--border-hi)}
-  .fmt-btn.active{background:linear-gradient(135deg,var(--accent),var(--accent2)); border-color:rgba(255,255,255,.18);
+  .fmt-btn.active{background:var(--grad-full); border-color:rgba(255,255,255,.18);
     box-shadow:0 8px 20px rgba(111,141,255,.3), inset 0 1px 0 rgba(255,255,255,.25); transform:translateY(-1px)}
   .fmt-btn .ic{font-size:23px; display:block; margin-bottom:5px}
   .fmt-btn .t{font-weight:800; font-size:13px}
   .fmt-btn .s{font-size:10.5px; color:var(--muted); margin-top:2px}
   .fmt-btn.active .s{color:rgba(255,255,255,.85)}
 
-  .btn{background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; border:1px solid rgba(255,255,255,.15);
+  .btn{background:var(--grad-full); color:#fff; border:1px solid rgba(255,255,255,.15);
     padding:15px 20px; border-radius:16px; font-size:14.5px; font-weight:700; text-decoration:none;
     white-space:nowrap; display:inline-flex; align-items:center; justify-content:center; gap:7px; cursor:pointer;
     box-shadow:0 10px 24px rgba(111,141,255,.32), inset 0 1px 0 rgba(255,255,255,.28); width:100%;
@@ -806,7 +810,7 @@ PAGE = r"""
   .profile-card{background:var(--glass); border:1px solid var(--border-hi); border-radius:22px; padding:28px 20px; text-align:center;
     backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%); box-shadow:var(--shadow-glass)}
   .avatar{width:80px;height:80px;border-radius:50%; margin:0 auto 13px; object-fit:cover;
-    border:3px solid transparent; background:linear-gradient(135deg,var(--accent),var(--accent2)) border-box,
+    border:3px solid transparent; background:var(--grad-full) border-box,
     var(--panel2) padding-box; display:flex; align-items:center; justify-content:center; font-size:30px;
     box-shadow:0 8px 22px rgba(111,141,255,.3)}
   .p-name{font-size:17px; font-weight:800}
@@ -829,7 +833,7 @@ PAGE = r"""
     gap:3px; color:var(--muted); font-size:10.5px; font-weight:700; cursor:pointer; height:100%;
     border-radius:16px; transition:all .2s cubic-bezier(.4,0,.2,1); position:relative;}
   .nav-item .ic{font-size:19px; transition:transform .2s ease}
-  .nav-item.active{color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent2));
+  .nav-item.active{color:#fff; background:var(--grad-full);
     box-shadow:0 6px 16px rgba(111,141,255,.35), inset 0 1px 0 rgba(255,255,255,.25);}
   .nav-item.active .ic{transform:translateY(-1px)}
 
@@ -841,7 +845,7 @@ PAGE = r"""
 
   .footer{text-align:center; margin-top:30px; padding:20px 0 6px; color:var(--muted); font-size:11.5px}
   .footer .badge{display:inline-flex; align-items:center; gap:6px; margin-top:9px; padding:7px 15px; border-radius:999px;
-    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; font-weight:800; font-size:11px;
+    background:var(--grad-full); color:#fff; font-weight:800; font-size:11px;
     box-shadow:0 6px 16px rgba(111,141,255,.28), inset 0 1px 0 rgba(255,255,255,.25)}
 </style>
 </head>
@@ -860,20 +864,20 @@ PAGE = r"""
   <!-- ================= HOME ================= -->
   <div class="view active" id="view-home">
     <div class="hero">
-      <div class="pill">⚡ Siyam X presented</div>
-      <h1>Vide converter</h1>
-      <p>যেকোনো ভিডিওকে 3GP অথবা MP3-তে রূপান্তর করো। গ্যালারি থেকে আপলোড করো, অথবা টেলিগ্রাম বটে ফরওয়ার্ড করে সরাসরি অ্যাপ থেকে কনভার্ট করো।</p>
+      <div class="pill">⚡ ffmpeg powered</div>
+      <h1>Video Converter</h1>
+      <p>যেকোনো Video-কে Feature Phone উপযোগী 3GP অথবা MP3-তে Convert করো। Gallery থেকে Upload করো, অথবা Telegram বটে Forward করে সরাসরি App থেকে Convert করো।</p>
     </div>
     <div class="stat-row">
-      <div class="stat-card"><div class="n" id="home-myvideos">0</div><div class="l">আমার ভিডিও</div></div>
-      <div class="stat-card"><div class="n" id="home-history">0</div><div class="l">কনভার্ট হিস্টোরি</div></div>
+      <div class="stat-card"><div class="n" id="home-myvideos">0</div><div class="l">My Videos</div></div>
+      <div class="stat-card"><div class="n" id="home-history">0</div><div class="l">Convert History</div></div>
     </div>
-    <button class="btn" onclick="goTab('tools')">🚀 Start Convert</button>
+    <button class="btn" onclick="goTab('tools')">🚀 এখনই Convert শুরু করো</button>
 
-    <h2 class="section">📌 লিমিট</h2>
-    <div class="hist-card"><div class="hist-left"><span class="hist-ico">📁</span><div><div class="hist-name">আপলোড</div><div class="hist-meta">সর্বোচ্চ 1 GB</div></div></div></div>
-    <div class="hist-card"><div class="hist-left"><span class="hist-ico">📥</span><div><div class="hist-name">Telegram থেকে সেভ</div><div class="hist-meta">সর্বোচ্চ 20 MB</div></div></div></div>
-    <div class="hist-card"><div class="hist-left"><span class="hist-ico">🤖</span><div><div class="hist-name">বটে ফেরত পাঠানো</div><div class="hist-meta">সর্বোচ্চ 50 MB</div></div></div></div>
+    <h2 class="section">📌 Limits</h2>
+    <div class="hist-card"><div class="hist-left"><span class="hist-ico">📁</span><div><div class="hist-name">Upload</div><div class="hist-meta">Max 1 GB</div></div></div></div>
+    <div class="hist-card"><div class="hist-left"><span class="hist-ico">📥</span><div><div class="hist-name">Telegram থেকে Save</div><div class="hist-meta">Max 20 MB</div></div></div></div>
+    <div class="hist-card"><div class="hist-left"><span class="hist-ico">🤖</span><div><div class="hist-name">Bot-এ ফেরত পাঠানো</div><div class="hist-meta">Max 50 MB</div></div></div></div>
 
     <div class="footer">Smart video tools for feature phones<div class="badge">✨ Developed by TANVIR SIYAM</div></div>
   </div>
@@ -882,42 +886,42 @@ PAGE = r"""
   <div class="view" id="view-tools">
     <div class="steps">
       <div class="step">
-        <div class="step-head"><div class="step-num">1</div><div class="step-title">Select Video</div></div>
+        <div class="step-head"><div class="step-num">1</div><div class="step-title">Video বাছাই করো</div></div>
         <div class="source-row">
           <div class="source-btn active" id="src-upload" onclick="selectSource('upload')"><span class="ic">📤</span>From Device</div>
-          <div class="source-btn" id="src-myvideos" onclick="selectSource('myvideos')"><span class="ic">📥</span>Saves video</div>
+          <div class="source-btn" id="src-myvideos" onclick="selectSource('myvideos')"><span class="ic">📥</span>My Videos</div>
         </div>
 
         <div id="panel-src-upload">
           <div class="dropzone" id="dropzone">
             <div class="dz-icon">📤</div>
-            <div class="dz-title">Drag File</div>
-            <div class="dz-sub"> Max 1 GB</div>
+            <div class="dz-title">Tap করো বা Drag & Drop করো</div>
+            <div class="dz-sub">Max 1 GB</div>
             <input type="file" id="fileInput" accept="video/*">
           </div>
           <div class="picked-tag" id="pickedTag"><span id="pickedTagText"></span><span class="x" onclick="clearPicked(event)">✕</span></div>
         </div>
 
         <div id="panel-src-myvideos" style="display:none">
-          <div class="video-pick-list" id="videoPickList"><div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div></div>
+          <div class="video-pick-list" id="videoPickList"><div class="empty"><span class="e-ico">⏳</span>Loading...</div></div>
         </div>
       </div>
 
       <div class="step">
         <div class="step-head"><div class="step-num">2</div><div class="step-title">Output Format</div></div>
         <div class="fmt-row">
-          <div class="fmt-btn active" id="fmt-3gp" onclick="selectFormat('3gp')"><span class="ic">📱</span><div class="t">3GP</div><div class="s">3GP</div></div>
-          <div class="fmt-btn" id="fmt-mp3" onclick="selectFormat('mp3')"><span class="ic">🎵</span><div class="t">MP3</div><div class="s">MP3</div></div>
+          <div class="fmt-btn active" id="fmt-3gp" onclick="selectFormat('3gp')"><span class="ic">📱</span><div class="t">3GP</div><div class="s">Feature Phone Video</div></div>
+          <div class="fmt-btn" id="fmt-mp3" onclick="selectFormat('mp3')"><span class="ic">🎵</span><div class="t">MP3</div><div class="s">Audio Only</div></div>
         </div>
       </div>
 
-      <button class="btn" id="convertBtn" disabled onclick="startConvert()">🚀 Convert</button>
+      <button class="btn" id="convertBtn" disabled onclick="startConvert()">🚀 Convert Now</button>
 
       <div class="step" id="progressCard" style="display:none">
         <div class="progress-card" id="progressInner">
           <div class="spinner"></div>
-          <div style="font-weight:700;margin-bottom:4px">Processing...</div>
-          <div style="color:var(--muted);font-size:12.5px">Please wait.., It will take more/less time depending on the size.</div>
+          <div style="font-weight:700;margin-bottom:4px">Converting...</div>
+          <div style="color:var(--muted);font-size:12.5px">একটু Wait করো, File-এর Size অনুযায়ী সময় লাগতে পারে</div>
         </div>
       </div>
     </div>
@@ -925,15 +929,15 @@ PAGE = r"""
 
   <!-- ================= HISTORY ================= -->
   <div class="view" id="view-history">
-    <h2 class="section" style="margin-top:4px">✅ Convert History<span id="hist-count" style="color:var(--muted);font-weight:600"></span></h2>
-    <div id="historyList"><div class="empty"><span class="e-ico">⏳</span>Processing...</div></div>
-    <div class="footer">টেম্প মেমোরিতে সংরক্ষিত — ডিলিট না করা পর্যন্ত ডাউনলোড করা যাবে</div>
+    <h2 class="section" style="margin-top:4px">✅ Convert History <span id="hist-count" style="color:var(--muted);font-weight:600"></span></h2>
+    <div id="historyList"><div class="empty"><span class="e-ico">⏳</span>Loading...</div></div>
+    <div class="footer">Temporary Memory-তে Save করা আছে — Delete না করা পর্যন্ত Download করা যাবে</div>
   </div>
 
   <!-- ================= PROFILE ================= -->
   <div class="view" id="view-profile">
     <h2 class="section" style="margin-top:4px">👤 Profile</h2>
-    <div id="profileBox"><div class="empty"><span class="e-ico">⏳</span>Processing...</div></div>
+    <div id="profileBox"><div class="empty"><span class="e-ico">⏳</span>Loading...</div></div>
     <div class="footer">Smart video tools for feature phones<div class="badge">✨ Developed by TANVIR SIYAM</div></div>
   </div>
 
@@ -1042,11 +1046,11 @@ PAGE = r"""
 
   function loadMyVideos() {
     const list = document.getElementById('videoPickList');
-    list.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div>';
+    list.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>Loading...</div>';
     apiFetch('/api/my-videos').then(r=>r.json()).then(data=>{
       document.getElementById('home-myvideos').textContent = data.videos.length;
       if (!data.videos.length) {
-        list.innerHTML = '<div class="empty"><span class="e-ico">📭</span>কোনো ভিডিও নেই — টেলিগ্রাম বটে ফরওয়ার্ড করো অথবা ডিভাইস থেকে আপলোড করো</div>';
+        list.innerHTML = '<div class="empty"><span class="e-ico">📭</span>কোনো Video নেই — Telegram বটে Forward করো অথবা Device থেকে Upload করো</div>';
         return;
       }
       list.innerHTML = '';
@@ -1069,8 +1073,8 @@ PAGE = r"""
   function showProgressSpinner() {
     document.getElementById('progressInner').innerHTML = `
       <div class="spinner"></div>
-      <div style="font-weight:700;margin-bottom:4px">কনভার্ট হচ্ছে...</div>
-      <div style="color:var(--muted);font-size:12.5px">একটু অপেক্ষা করো, ফাইলের সাইজ অনুযায়ী সময় লাগতে পারে</div>`;
+      <div style="font-weight:700;margin-bottom:4px">Converting...</div>
+      <div style="color:var(--muted);font-size:12.5px">একটু Wait করো, File-এর Size অনুযায়ী সময় লাগতে পারে</div>`;
   }
 
   async function startConvert() {
@@ -1104,7 +1108,7 @@ PAGE = r"""
       if (data.error) throw new Error(data.error);
       pollStatus(data.job_id);
     } catch (e) {
-      showProgressError(e.message || 'একটি সমস্যা হয়েছে');
+      showProgressError(e.message || 'একটি Problem হয়েছে');
     }
   }
 
@@ -1127,11 +1131,11 @@ PAGE = r"""
     el.innerHTML = `
       <div class="result-card">
         <div class="ic">✅</div>
-        <div style="font-weight:800;margin-bottom:4px">কনভার্সন শেষ!</div>
+        <div style="font-weight:800;margin-bottom:4px">Conversion Complete!</div>
         <div style="color:var(--muted);font-size:12.5px;margin-bottom:16px">
-          ${result.filename} (${result.size})${result.sent_to_bot ? ' — টেলিগ্রাম বটেও পাঠানো হয়েছে ✓' : ''}
+          ${result.filename} (${result.size})${result.sent_to_bot ? ' — Telegram বটেও পাঠানো হয়েছে ✓' : ''}
         </div>
-        <a class="btn dl" href="${result.download_url}">⬇️ ডাউনলোড করো</a>
+        <a class="btn dl" href="${result.download_url}">⬇️ Download</a>
       </div>`;
     resetPicker();
     loadHomeStats();
@@ -1140,7 +1144,7 @@ PAGE = r"""
   function showProgressError(msg) {
     const el = document.getElementById('progressInner');
     el.innerHTML = `<div class="result-card"><div class="ic">⚠️</div>
-      <div style="font-weight:800;color:var(--err);margin-bottom:8px">কনভার্সন ব্যর্থ হয়েছে</div>
+      <div style="font-weight:800;color:var(--err);margin-bottom:8px">Conversion Failed</div>
       <div class="err-box">${msg}</div></div>`;
     document.getElementById('convertBtn').disabled = false;
   }
@@ -1156,12 +1160,12 @@ PAGE = r"""
   // ---------- History ----------
   function loadHistory() {
     const list = document.getElementById('historyList');
-    list.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div>';
+    list.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>Loading...</div>';
     apiFetch('/api/history').then(r=>r.json()).then(data=>{
       document.getElementById('hist-count').textContent = data.history.length ? `(${data.history.length})` : '';
       document.getElementById('home-history').textContent = data.history.length;
       if (!data.history.length) {
-        list.innerHTML = '<div class="empty"><span class="e-ico">📦</span>এখনো কোনো কনভার্সন নেই</div>';
+        list.innerHTML = '<div class="empty"><span class="e-ico">📦</span>এখনো কোনো Conversion নেই</div>';
         return;
       }
       list.innerHTML = '';
@@ -1177,8 +1181,8 @@ PAGE = r"""
             </div>
           </div>
           <div class="hist-actions">
-            <a class="icon-btn" href="${h.download_url}" title="ডাউনলোড">⬇️</a>
-            <div class="icon-btn danger" title="ডিলিট" onclick="deleteHistory('${h.id}', this)">🗑</div>
+            <a class="icon-btn" href="${h.download_url}" title="Download">⬇️</a>
+            <div class="icon-btn danger" title="Delete" onclick="deleteHistory('${h.id}', this)">🗑</div>
           </div>`;
         list.appendChild(card);
       });
@@ -1186,22 +1190,22 @@ PAGE = r"""
   }
 
   function deleteHistory(id, el) {
-    if (!confirm('এই ফাইলটি স্থায়ীভাবে ডিলিট করতে চাও?')) return;
+    if (!confirm('এই File-টি Permanently Delete করতে চাও?')) return;
     apiFetch('/api/history/' + id, {method:'DELETE'}).then(r=>r.json()).then(d=>{
-      if (d.deleted) { showToast('ডিলিট করা হয়েছে'); loadHistory(); }
+      if (d.deleted) { showToast('Deleted ✓'); loadHistory(); }
     });
   }
 
   // ---------- Profile ----------
   function loadProfile() {
     const box = document.getElementById('profileBox');
-    box.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div>';
+    box.innerHTML = '<div class="empty"><span class="e-ico">⏳</span>Loading...</div>';
     apiFetch('/api/profile').then(r=>r.json()).then(p=>{
       if (!p.is_telegram) {
         box.innerHTML = `<div class="profile-card">
           <div class="avatar">👤</div>
           <div class="p-name">Guest User</div>
-          <div class="p-username" style="margin-top:8px">টেলিগ্রাম বট থেকে অ্যাপটি খুললে তোমার প্রোফাইল এখানে অটোমেটিক দেখা যাবে</div>
+          <div class="p-username" style="margin-top:8px">Telegram বট থেকে App-টি খুললে তোমার Profile এখানে Automatic দেখা যাবে</div>
         </div>`;
         return;
       }
@@ -1211,7 +1215,7 @@ PAGE = r"""
         <div class="p-name">${fullName}</div>
         <div class="p-username">${p.username ? '@'+p.username : ''}</div>
         <div class="p-stats">
-          <div class="p-stat"><b>${p.conversions}</b><span>কনভার্সন</span></div>
+          <div class="p-stat"><b>${p.conversions}</b><span>Conversions</span></div>
         </div>
       </div>`;
     });
