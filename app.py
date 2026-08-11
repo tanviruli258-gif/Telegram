@@ -384,8 +384,8 @@ def handle_incoming_video(chat_id, file_id, orig_name, file_size):
     pending_id = uuid.uuid4().hex[:10]
     PENDING[pending_id] = {"file_id": file_id, "name": orig_name, "chat_id": chat_id, "size": file_size}
     keyboard = {"inline_keyboard": [[
-        {"text": "✅ সেভ করুন", "callback_data": f"save:{pending_id}"},
-        {"text": "🗑 ডিলিট করুন", "callback_data": f"del:{pending_id}"},
+        {"text": "✅ SAVE", "callback_data": f"save:{pending_id}"},
+        {"text": "🗑️ DELETE", "callback_data": f"del:{pending_id}"},
     ]]}
     msg = send_message(chat_id, f"🎬 ভিডিও পাওয়া গেছে: {orig_name}\nসেভ করবে নাকি ডিলিট করবে?", reply_markup=keyboard)
     if msg:
@@ -860,15 +860,15 @@ PAGE = r"""
   <!-- ================= HOME ================= -->
   <div class="view active" id="view-home">
     <div class="hero">
-      <div class="pill">⚡ ffmpeg powered</div>
-      <h1>ভিডিও কনভার্টার</h1>
-      <p>যেকোনো ভিডিওকে বাটন-ফোন উপযোগী 3GP অথবা MP3-তে রূপান্তর করো। গ্যালারি থেকে আপলোড করো, অথবা টেলিগ্রাম বটে ফরওয়ার্ড করে সরাসরি অ্যাপ থেকে কনভার্ট করো।</p>
+      <div class="pill">⚡ Siyam X presented</div>
+      <h1>Vide converter</h1>
+      <p>যেকোনো ভিডিওকে 3GP অথবা MP3-তে রূপান্তর করো। গ্যালারি থেকে আপলোড করো, অথবা টেলিগ্রাম বটে ফরওয়ার্ড করে সরাসরি অ্যাপ থেকে কনভার্ট করো।</p>
     </div>
     <div class="stat-row">
       <div class="stat-card"><div class="n" id="home-myvideos">0</div><div class="l">আমার ভিডিও</div></div>
       <div class="stat-card"><div class="n" id="home-history">0</div><div class="l">কনভার্ট হিস্টোরি</div></div>
     </div>
-    <button class="btn" onclick="goTab('tools')">🚀 এখনই কনভার্ট শুরু করো</button>
+    <button class="btn" onclick="goTab('tools')">🚀 Start Convert</button>
 
     <h2 class="section">📌 লিমিট</h2>
     <div class="hist-card"><div class="hist-left"><span class="hist-ico">📁</span><div><div class="hist-name">আপলোড</div><div class="hist-meta">সর্বোচ্চ 1 GB</div></div></div></div>
@@ -882,17 +882,17 @@ PAGE = r"""
   <div class="view" id="view-tools">
     <div class="steps">
       <div class="step">
-        <div class="step-head"><div class="step-num">1</div><div class="step-title">ভিডিও বাছাই করো</div></div>
+        <div class="step-head"><div class="step-num">1</div><div class="step-title">Select Video</div></div>
         <div class="source-row">
-          <div class="source-btn active" id="src-upload" onclick="selectSource('upload')"><span class="ic">📤</span>ডিভাইস থেকে</div>
-          <div class="source-btn" id="src-myvideos" onclick="selectSource('myvideos')"><span class="ic">📥</span>আমার ভিডিও</div>
+          <div class="source-btn active" id="src-upload" onclick="selectSource('upload')"><span class="ic">📤</span>From Device</div>
+          <div class="source-btn" id="src-myvideos" onclick="selectSource('myvideos')"><span class="ic">📥</span>Saves video</div>
         </div>
 
         <div id="panel-src-upload">
           <div class="dropzone" id="dropzone">
             <div class="dz-icon">📤</div>
-            <div class="dz-title">ট্যাপ করো বা ড্র্যাগ করো</div>
-            <div class="dz-sub">সর্বোচ্চ 1 GB</div>
+            <div class="dz-title">Drag File</div>
+            <div class="dz-sub"> Max 1 GB</div>
             <input type="file" id="fileInput" accept="video/*">
           </div>
           <div class="picked-tag" id="pickedTag"><span id="pickedTagText"></span><span class="x" onclick="clearPicked(event)">✕</span></div>
@@ -904,20 +904,20 @@ PAGE = r"""
       </div>
 
       <div class="step">
-        <div class="step-head"><div class="step-num">2</div><div class="step-title">আউটপুট ফরম্যাট</div></div>
+        <div class="step-head"><div class="step-num">2</div><div class="step-title">Output Format</div></div>
         <div class="fmt-row">
-          <div class="fmt-btn active" id="fmt-3gp" onclick="selectFormat('3gp')"><span class="ic">📱</span><div class="t">3GP</div><div class="s">বাটন ফোন ভিডিও</div></div>
-          <div class="fmt-btn" id="fmt-mp3" onclick="selectFormat('mp3')"><span class="ic">🎵</span><div class="t">MP3</div><div class="s">শুধু অডিও</div></div>
+          <div class="fmt-btn active" id="fmt-3gp" onclick="selectFormat('3gp')"><span class="ic">📱</span><div class="t">3GP</div><div class="s">3GP</div></div>
+          <div class="fmt-btn" id="fmt-mp3" onclick="selectFormat('mp3')"><span class="ic">🎵</span><div class="t">MP3</div><div class="s">MP3</div></div>
         </div>
       </div>
 
-      <button class="btn" id="convertBtn" disabled onclick="startConvert()">🚀 কনভার্ট করো</button>
+      <button class="btn" id="convertBtn" disabled onclick="startConvert()">🚀 Convert</button>
 
       <div class="step" id="progressCard" style="display:none">
         <div class="progress-card" id="progressInner">
           <div class="spinner"></div>
-          <div style="font-weight:700;margin-bottom:4px">কনভার্ট হচ্ছে...</div>
-          <div style="color:var(--muted);font-size:12.5px">একটু অপেক্ষা করো, ফাইলের সাইজ অনুযায়ী সময় লাগতে পারে</div>
+          <div style="font-weight:700;margin-bottom:4px">Processing...</div>
+          <div style="color:var(--muted);font-size:12.5px">Please wait.., It will take more/less time depending on the size.</div>
         </div>
       </div>
     </div>
@@ -925,15 +925,15 @@ PAGE = r"""
 
   <!-- ================= HISTORY ================= -->
   <div class="view" id="view-history">
-    <h2 class="section" style="margin-top:4px">✅ কনভার্ট হিস্টোরি <span id="hist-count" style="color:var(--muted);font-weight:600"></span></h2>
-    <div id="historyList"><div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div></div>
+    <h2 class="section" style="margin-top:4px">✅ Convert History<span id="hist-count" style="color:var(--muted);font-weight:600"></span></h2>
+    <div id="historyList"><div class="empty"><span class="e-ico">⏳</span>Processing...</div></div>
     <div class="footer">টেম্প মেমোরিতে সংরক্ষিত — ডিলিট না করা পর্যন্ত ডাউনলোড করা যাবে</div>
   </div>
 
   <!-- ================= PROFILE ================= -->
   <div class="view" id="view-profile">
-    <h2 class="section" style="margin-top:4px">👤 প্রোফাইল</h2>
-    <div id="profileBox"><div class="empty"><span class="e-ico">⏳</span>লোড হচ্ছে...</div></div>
+    <h2 class="section" style="margin-top:4px">👤 Profile</h2>
+    <div id="profileBox"><div class="empty"><span class="e-ico">⏳</span>Processing...</div></div>
     <div class="footer">Smart video tools for feature phones<div class="badge">✨ Developed by TANVIR SIYAM</div></div>
   </div>
 
@@ -1200,7 +1200,7 @@ PAGE = r"""
       if (!p.is_telegram) {
         box.innerHTML = `<div class="profile-card">
           <div class="avatar">👤</div>
-          <div class="p-name">গেস্ট ইউজার</div>
+          <div class="p-name">Guest User</div>
           <div class="p-username" style="margin-top:8px">টেলিগ্রাম বট থেকে অ্যাপটি খুললে তোমার প্রোফাইল এখানে অটোমেটিক দেখা যাবে</div>
         </div>`;
         return;
