@@ -43,6 +43,21 @@ def safe_name(name):
     return name
 
 
+def human_size(num_bytes):
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024*1024):.1f} MB"
+    return f"{num_bytes / 1024:.0f} KB"
+
+
+def list_with_sizes(folder):
+    items = []
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            items.append({"name": name, "size": human_size(os.path.getsize(path))})
+    return items
+
+
 # ---------------------------------------------------------
 # ------------------- CloudConvert অংশ ---------------------
 # ---------------------------------------------------------
@@ -132,15 +147,19 @@ def cloudconvert_convert_to_3gp(input_path, filename):
     return out_name
 
 
-def background_convert(job_id, input_path, filename, send_to_telegram):
+def background_convert(job_id, input_path, filename):
     try:
         JOBS[job_id]["status"] = "processing"
         out_filename = cloudconvert_convert_to_3gp(input_path, filename)
         JOBS[job_id]["status"] = "finished"
         JOBS[job_id]["output"] = out_filename
 
-        if send_to_telegram and LAST_CHAT_ID["id"]:
-            send_document_to_telegram(LAST_CHAT_ID["id"], os.path.join(CONVERTED_FOLDER, out_filename))
+        # সোর্স যাই হোক (Telegram বা গ্যালারি আপলোড) — কনভার্ট শেষ হলে সবসময়
+        # শেষ যে চ্যাটে বট ব্যবহার হয়েছে সেখানে ফাইলটা পাঠিয়ে দেওয়া হয়।
+        if LAST_CHAT_ID["id"]:
+            JOBS[job_id]["sent_to_bot"] = send_document_to_telegram(
+                LAST_CHAT_ID["id"], os.path.join(CONVERTED_FOLDER, out_filename)
+            )
     except Exception as e:
         JOBS[job_id]["status"] = "error"
         JOBS[job_id]["error"] = str(e)
@@ -195,15 +214,25 @@ def answer_callback_query(callback_id, text=None):
         pass
 
 
+TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024  # বট থেকে সরাসরি ফাইল পাঠানোর ক্ষেত্রে টেলিগ্রামের সীমা
+
+
 def send_document_to_telegram(chat_id, filepath):
     try:
+        if os.path.getsize(filepath) > TELEGRAM_MAX_UPLOAD:
+            send_message(chat_id, "⚠️ কনভার্ট হওয়া ফাইলটি ৫০MB-র বেশি, তাই বটে পাঠানো যায়নি। ওয়েবসাইট থেকে সরাসরি ডাউনলোড করো।")
+            return False
         with open(filepath, "rb") as f:
-            requests.post(f"{TG_API}/sendDocument",
-                           data={"chat_id": chat_id},
-                           files={"document": f},
-                           timeout=300)
+            r = requests.post(f"{TG_API}/sendDocument",
+                               data={"chat_id": chat_id},
+                               files={"document": f},
+                               timeout=300)
+        ok = r.json().get("ok", False)
+        if not ok:
+            send_message(chat_id, "⚠️ কনভার্ট হওয়া ফাইলটি বটে পাঠাতে সমস্যা হয়েছে। ওয়েবসাইট থেকে ডাউনলোড করে নাও।")
+        return ok
     except Exception:
-        pass
+        return False
 
 
 def download_telegram_file(file_id, save_as):
@@ -464,6 +493,19 @@ PAGE = r"""
     width:34px;height:34px;border-radius:10px;flex:none;
     background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:15px;
   }
+  .fname > span{display:flex; flex-direction:column; gap:2px; min-width:0}
+  .fn-name{font-weight:600}
+  .fn-size{font-size:11px; color:var(--muted); font-weight:500}
+
+  .info-bar{
+    display:flex; gap:8px; margin-bottom:20px; overflow-x:auto; padding-bottom:2px;
+  }
+  .info-chip{
+    flex:none; background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:9px 13px; font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:6px;
+    white-space:nowrap;
+  }
+  .info-chip b{color:var(--text); font-weight:700}
   .empty{color:var(--muted); font-size:12.5px; padding:26px 10px; text-align:center;
     border:1px dashed var(--border); border-radius:16px; background:var(--panel)}
   .empty .e-ico{font-size:26px; display:block; margin-bottom:6px; opacity:.6}
@@ -515,6 +557,12 @@ PAGE = r"""
     <p>বাটন ফোনে চালানোর জন্য যেকোনো ভিডিওকে ছোট, কম্প্যাটিবল 3GP ফাইলে রূপান্তর করো — গ্যালারি থেকে আপলোড করো, অথবা টেলিগ্রাম বট থেকে সরাসরি সেভ করা ভিডিও কনভার্ট করো।</p>
   </div>
 
+  <div class="info-bar">
+    <div class="info-chip">📁 আপলোড সর্বোচ্চ <b>1 GB</b></div>
+    <div class="info-chip">📥 Telegram থেকে সর্বোচ্চ <b>20 MB</b></div>
+    <div class="info-chip">🤖 বটে ফেরত পাঠানো সর্বোচ্চ <b>50 MB</b></div>
+  </div>
+
   <form id="uploadForm" class="dropzone" method="POST" action="/upload" enctype="multipart/form-data">
     <div class="dz-icon">📤</div>
     <div class="dz-title">ভিডিও ড্র্যাগ করো অথবা ট্যাপ করে বেছে নাও</div>
@@ -534,8 +582,8 @@ PAGE = r"""
   <div class="panel active" id="panel-tg">
     {% for f in telegram_files %}
       <div class="card">
-        <span class="fname"><span class="ico">🎬</span>{{ f }}</span>
-        <a class="btn" href="{{ url_for('convert', source='telegram', filename=f) }}">কনভার্ট</a>
+        <span class="fname"><span class="ico">🎬</span><span><span class="fn-name">{{ f.name }}</span><span class="fn-size">{{ f.size }}</span></span></span>
+        <a class="btn" href="{{ url_for('convert', source='telegram', filename=f.name) }}">কনভার্ট</a>
       </div>
     {% else %}
       <div class="empty"><span class="e-ico">📭</span>এখনো কোনো ভিডিও নেই — বটে ভিডিও ফরওয়ার্ড করে "সেভ করুন" চাপো</div>
@@ -545,8 +593,8 @@ PAGE = r"""
   <div class="panel" id="panel-up">
     {% for f in uploaded_files %}
       <div class="card">
-        <span class="fname"><span class="ico">🎞️</span>{{ f }}</span>
-        <a class="btn" href="{{ url_for('convert', source='upload', filename=f) }}">কনভার্ট</a>
+        <span class="fname"><span class="ico">🎞️</span><span><span class="fn-name">{{ f.name }}</span><span class="fn-size">{{ f.size }}</span></span></span>
+        <a class="btn" href="{{ url_for('convert', source='upload', filename=f.name) }}">কনভার্ট</a>
       </div>
     {% else %}
       <div class="empty"><span class="e-ico">🗂️</span>কোনো ভিডিও নেই</div>
@@ -556,8 +604,8 @@ PAGE = r"""
   <div class="panel" id="panel-done">
     {% for f in converted_files %}
       <div class="card">
-        <span class="fname"><span class="ico">✅</span>{{ f }}</span>
-        <a class="btn dl" href="{{ url_for('download', filename=f) }}">ডাউনলোড</a>
+        <span class="fname"><span class="ico">✅</span><span><span class="fn-name">{{ f.name }}</span><span class="fn-size">{{ f.size }}</span></span></span>
+        <a class="btn dl" href="{{ url_for('download', filename=f.name) }}">ডাউনলোড</a>
       </div>
     {% else %}
       <div class="empty"><span class="e-ico">📦</span>কোনো ফাইল নেই</div>
@@ -678,7 +726,7 @@ STATUS_PAGE = r"""
     <div class="status-box ok">
       <div style="font-size:42px;margin-bottom:10px">✅</div>
       <h3>কনভার্সন শেষ!</h3>
-      <p>তোমার 3GP ফাইল তৈরি হয়ে গেছে</p>
+      <p>তোমার 3GP ফাইল তৈরি হয়ে গেছে{% if sent_to_bot %} এবং টেলিগ্রাম বটেও পাঠানো হয়েছে ✓{% endif %}</p>
       <a class="btn" href="{{ url_for('download', filename=output) }}">⬇️ ডাউনলোড করো</a>
     </div>
   {% elif status == "error" %}
@@ -706,9 +754,9 @@ STATUS_PAGE = r"""
 def home():
     return render_template_string(
         PAGE,
-        telegram_files=os.listdir(TELEGRAM_FOLDER),
-        uploaded_files=os.listdir(UPLOAD_FOLDER),
-        converted_files=os.listdir(CONVERTED_FOLDER),
+        telegram_files=list_with_sizes(TELEGRAM_FOLDER),
+        uploaded_files=list_with_sizes(UPLOAD_FOLDER),
+        converted_files=list_with_sizes(CONVERTED_FOLDER),
     )
 
 
@@ -729,10 +777,9 @@ def convert(source, filename):
         return "ফাইল খুঁজে পাওয়া যায়নি", 404
 
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "queued", "output": None, "error": None}
+    JOBS[job_id] = {"status": "queued", "output": None, "error": None, "sent_to_bot": False}
 
-    send_to_tg = (source == "telegram")
-    thread = threading.Thread(target=background_convert, args=(job_id, input_path, filename, send_to_tg))
+    thread = threading.Thread(target=background_convert, args=(job_id, input_path, filename))
     thread.start()
 
     return redirect(url_for("status", job_id=job_id))
@@ -743,7 +790,10 @@ def status(job_id):
     job = JOBS.get(job_id)
     if not job:
         return "জব খুঁজে পাওয়া যায়নি", 404
-    return render_template_string(STATUS_PAGE, status=job["status"], output=job["output"], error=job["error"])
+    return render_template_string(
+        STATUS_PAGE, status=job["status"], output=job["output"], error=job["error"],
+        sent_to_bot=job.get("sent_to_bot", False),
+    )
 
 
 @app.route("/download/<path:filename>")
