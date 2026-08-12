@@ -171,17 +171,23 @@ def telegram_chat_id_for(uid):
 # চালানো হয় — এটা format-matrix-এর সীমার বাইরে, তাই 3GP ও MP3 দুটোই নিশ্চিতভাবে কাজ করে।
 def build_ffmpeg_args(filename, fmt, out_filename):
     src = f"/input/upload-file/{filename}"
+    # -max_muxing_queue_size ও -avoid_negative_ts যোগ করা হয়েছে যাতে বড়/দীর্ঘ ভিডিওতে
+    # মিউক্সার বাফার ওভারফ্লো হয়ে কনভার্সন মাঝপথে থেমে না যায় (এতেই কম সময়ের আউটপুট আসার বাগ হতো)
     if fmt == "3gp":
         return (
-            f"-i {src} -vf scale=176:144 -vcodec h263 -b:v 128k -r 15 "
-            f"-acodec aac -ar 8000 -ac 1 -b:a 32k -y /output/{out_filename}"
+            f"-i {src} -map 0:v:0 -map 0:a:0? -vf scale=176:144 -vcodec h263 -b:v 128k -r 15 "
+            f"-acodec aac -ar 8000 -ac 1 -b:a 32k -max_muxing_queue_size 9999 "
+            f"-avoid_negative_ts make_zero -y /output/{out_filename}"
         )
     if fmt == "mp3":
-        return f"-i {src} -vn -acodec libmp3lame -ar 44100 -b:a 128k -y /output/{out_filename}"
+        return (
+            f"-i {src} -map 0:a:0 -vn -acodec libmp3lame -ar 44100 -b:a 128k "
+            f"-max_muxing_queue_size 9999 -avoid_negative_ts make_zero -y /output/{out_filename}"
+        )
     raise ValueError("অসমর্থিত ফরম্যাট")
 
 
-def cloudconvert_convert(input_path, filename, fmt):
+def cloudconvert_convert(input_path, filename, fmt, progress_cb=None):
     if fmt not in ALLOWED_FORMATS:
         raise ValueError("অসমর্থিত ফরম্যাট")
     if not CLOUDCONVERT_API_KEY or "PASTE_YOUR" in CLOUDCONVERT_API_KEY:
@@ -201,11 +207,13 @@ def cloudconvert_convert(input_path, filename, fmt):
                 "engine": "ffmpeg",
                 "command": "ffmpeg",
                 "arguments": ffmpeg_args,
+                "timeout": 7200,
             },
             "export-file": {"operation": "export/url", "input": "convert-file"},
         }
     }
 
+    if progress_cb: progress_cb("uploading", 0)
     r = requests.post("https://api.cloudconvert.com/v2/jobs", json=job_payload, headers=headers, timeout=60)
     r.raise_for_status()
     job = r.json()["data"]
@@ -215,15 +223,22 @@ def cloudconvert_convert(input_path, filename, fmt):
     upload_params = upload_task["result"]["form"]["parameters"]
 
     with open(input_path, "rb") as f:
-        up = requests.post(upload_url, data=upload_params, files={"file": (filename, f)}, timeout=600)
+        up = requests.post(upload_url, data=upload_params, files={"file": (filename, f)}, timeout=1800)
         up.raise_for_status()
 
+    if progress_cb: progress_cb("converting", 0)
     job_id = job["id"]
     while True:
-        time.sleep(4)
+        time.sleep(2.5)
         r = requests.get(f"https://api.cloudconvert.com/v2/jobs/{job_id}", headers=headers, timeout=30)
         r.raise_for_status()
         job = r.json()["data"]
+        if progress_cb:
+            convert_task = next((t for t in job["tasks"] if t["name"] == "convert-file"), None)
+            if convert_task is not None:
+                percent = convert_task.get("percent")
+                if percent is not None:
+                    progress_cb("converting", percent)
         if job["status"] in ("finished", "error"):
             break
 
@@ -236,6 +251,7 @@ def cloudconvert_convert(input_path, filename, fmt):
             raise RuntimeError(f"({t['name']}{' / ' + code if code else ''}) {reason}")
         raise RuntimeError("CloudConvert job ব্যর্থ হয়েছে, কারণ পাওয়া যায়নি")
 
+    if progress_cb: progress_cb("downloading", 100)
     export_task = next(t for t in job["tasks"] if t["name"] == "export-file")
     result_files = export_task["result"]["files"]
     if not result_files:
@@ -251,7 +267,20 @@ def cloudconvert_convert(input_path, filename, fmt):
 def background_convert(job_id, uid, input_path, filename, fmt, source_label):
     try:
         JOBS[job_id]["status"] = "processing"
-        out_name, content = cloudconvert_convert(input_path, filename, fmt)
+
+        def progress_cb(stage, percent):
+            JOBS[job_id]["stage"] = stage
+            JOBS[job_id]["progress"] = percent
+
+        input_size = os.path.getsize(input_path) if os.path.exists(input_path) else 0
+        out_name, content = cloudconvert_convert(input_path, filename, fmt, progress_cb)
+
+        # সেফটি-নেট: বড় সোর্স ফাইলের তুলনায় আউটপুট অস্বাভাবিক রকম ছোট হলে
+        # (মিউক্সার/নেটওয়ার্ক গ্লিচে ভিডিও মাঝপথে থেমে যাওয়ার লক্ষণ) — একবার অটো রিট্রাই করা হয়
+        if input_size > 5 * 1024 * 1024 and len(content) < max(60 * 1024, input_size * 0.002):
+            JOBS[job_id]["stage"] = "retrying"
+            JOBS[job_id]["progress"] = 0
+            out_name, content = cloudconvert_convert(input_path, filename, fmt, progress_cb)
 
         out_dir = uid_folder(CONVERTED_ROOT, uid)
         out_path = os.path.join(out_dir, out_name)
@@ -275,12 +304,15 @@ def background_convert(job_id, uid, input_path, filename, fmt, source_label):
         sent = False
         chat_id = telegram_chat_id_for(uid)
         if chat_id:
+            JOBS[job_id]["stage"] = "sending"
             sent = send_document_to_telegram(chat_id, out_path)
         entry["sent_to_bot"] = sent
 
         add_history(uid, entry)
 
         JOBS[job_id]["status"] = "finished"
+        JOBS[job_id]["stage"] = "done"
+        JOBS[job_id]["progress"] = 100
         JOBS[job_id]["result"] = {
             "id": entry_id,
             "filename": out_name,
@@ -569,7 +601,7 @@ def api_convert():
         return jsonify({"error": "ফাইল খুঁজে পাওয়া যায়নি"}), 404
 
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "queued", "error": None, "result": None}
+    JOBS[job_id] = {"status": "queued", "stage": "queued", "progress": 0, "error": None, "result": None}
     thread = threading.Thread(target=background_convert, args=(job_id, uid, input_path, filename, fmt, source_label))
     thread.start()
     return jsonify({"job_id": job_id})
@@ -1070,11 +1102,29 @@ PAGE = r"""
     });
   }
 
+  const STAGE_LABEL = {
+    queued: 'Queue-তে অপেক্ষা করছে...',
+    uploading: 'File Upload হচ্ছে...',
+    converting: 'Converting...',
+    retrying: 'আবার Try করা হচ্ছে...',
+    downloading: 'Result Download হচ্ছে...',
+    sending: 'Telegram বটে পাঠানো হচ্ছে...',
+    done: 'সম্পন্ন!'
+  };
+
   function showProgressSpinner() {
+    renderProgress('queued', 0);
+  }
+
+  function renderProgress(stage, percent) {
+    const pct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+    const label = STAGE_LABEL[stage] || 'Converting...';
+    const showPct = (stage === 'converting' || stage === 'retrying');
     document.getElementById('progressInner').innerHTML = `
       <div class="spinner"></div>
-      <div style="font-weight:700;margin-bottom:4px">Converting...</div>
-      <div style="color:var(--muted);font-size:12.5px">একটু Wait করো, File-এর Size অনুযায়ী সময় লাগতে পারে</div>`;
+      <div style="font-weight:700;margin-bottom:6px">${label}</div>
+      <div class="prog-bar"><div class="prog-fill" style="width:${showPct ? pct : 8}%"></div></div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px">${showPct ? pct + '% সম্পন্ন — ' : ''}File-এর Size অনুযায়ী সময় লাগতে পারে</div>`;
   }
 
   async function startConvert() {
@@ -1122,8 +1172,10 @@ PAGE = r"""
       } else if (job.status === 'error') {
         clearInterval(iv);
         showProgressError(job.error);
+      } else {
+        renderProgress(job.stage || 'queued', job.progress || 0);
       }
-    }, 2500);
+    }, 1200);
   }
 
   function showProgressResult(result) {
